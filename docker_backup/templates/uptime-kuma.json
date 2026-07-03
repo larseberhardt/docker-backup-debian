@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "uptime-kuma",
+  "description": "Uptime Kuma (SQLite, WAL): the data volume (kuma.db + uploads) is captured as a file copy - crash-consistent, which SQLite WAL recovers from; worst case is losing the last seconds of heartbeat history. No SQL detection applies (embedded DB) - 'No database detected' at create is expected. 2FA secrets and notification configs are inside the DB; restore = folder/volume back, 'up -d'.",
+  "match": {
+    "image_tokens": [
+      "louislam/uptime-kuma"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 02:45",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

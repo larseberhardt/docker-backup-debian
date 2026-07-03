@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "nocodb",
+  "description": "NocoDB (Postgres): DB auto-detection dumps the Postgres DB (all bases/tables/views live there). The nc_data volume carries config incl. the auto-generated JWT secret (logins/API tokens) and is tarred as a named volume - keep it, or all tokens are invalidated on restore. If NC_ connects to an EXTERNAL DB (NC_DB), that DB is outside this stack and needs its own backup.",
+  "match": {
+    "image_tokens": [
+      "nocodb/nocodb"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 02:15",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "keycloak",
+  "description": "Keycloak (Postgres): DB auto-detection dumps the Postgres DB (postgres:16-alpine). The bundled pgbackups sidecar (prodrigestivill/postgres-backup-local) is correctly NOT recognized as a database (backup marker in the image name). The themes/provider volumes (configuration) are included in the backup; the raw Postgres data dir is excluded/not tarred - the logical dump replaces it. Keycloak's realm data (users, clients, client secrets, keys) lives entirely in Postgres - the DB dump is sufficient for restore, no external key needed. Check that POSTGRES_DB matches the database used in KC_DB_URL ('keycloak').",
+  "match": {
+    "image_tokens": [
+      "keycloak/keycloak"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 01:30",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

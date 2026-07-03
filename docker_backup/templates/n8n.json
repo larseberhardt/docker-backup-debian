@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "n8n",
+  "description": "n8n (SQLite by default, optional Postgres): with the default SQLite setup the data volume (~/.n8n incl. database.sqlite) is captured as a file copy (crash-consistent; 'No database detected' at create is then expected). If the stack runs the Postgres variant, DB auto-detection dumps it properly. CRITICAL: the N8N_ENCRYPTION_KEY (env or ~/.n8n/config inside the volume) encrypts all stored credentials - it is inside the backup, but keep an offline copy; without it restored workflows lose their credentials.",
+  "match": {
+    "image_tokens": [
+      "n8nio/n8n"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 03:45",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

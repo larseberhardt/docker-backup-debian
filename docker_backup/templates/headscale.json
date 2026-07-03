@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "headscale",
+  "description": "Headscale (Tailscale control server, SQLite): config and the SQLite DB (db.sqlite) live in the stack folder / data volume and are captured as a file copy - crash-consistent (SQLite WAL makes a live copy recoverable; the DB is tiny and writes are rare). No SQL detection applies (embedded DB), so 'No database detected' at create is expected. ESSENTIAL for restore: noise_private.key and derp/keys in the data dir - without them all nodes must re-register. They are inside the backup; restore the folder 1:1 and 'docker compose up -d'.",
+  "match": {
+    "image_tokens": [
+      "headscale/headscale"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 01:00",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "template_schema_version": 1,
+  "name": "registry",
+  "description": "Docker Registry (registry:2 / distribution): blob storage is content-addressed files - a live copy is safe (uploads in progress appear as incomplete _uploads and are ignored by the registry). No database. Consider 'registry garbage-collect' before big backups to shrink orphaned blobs. NOTE: template auto-detection matches the image token 'registry:' - if this hint fires on an unrelated stack that pulls from a host literally named 'registry:<port>', just ignore it.",
+  "match": {
+    "image_tokens": [
+      "registry:",
+      "distribution/distribution"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 01:45",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

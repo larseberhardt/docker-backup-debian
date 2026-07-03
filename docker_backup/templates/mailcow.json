@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "mailcow",
+  "description": "mailcow-dockerized: DB auto-detection dumps the MariaDB (mysql-mailcow, root via DBROOT) and the built-in quiesce checkpoints redis-mailcow (BGSAVE). All named volumes are tarred: vmail (the mails - Maildir, file-per-mail, live copy is fine), crypt (mail crypt keys - ESSENTIAL), rspamd, postfix, sogo. Regenerable volumes (clamd DB, fulltext index) are included too - volume-level excludes do not exist; accept the extra size. mailcow.conf + data/conf live in the stack folder. Alternative: mailcows own helper-scripts/backup_and_restore.sh - use ONE of the two as the source of truth. Backups can be large; the 12h service timeout leaves plenty of room.",
+  "match": {
+    "image_tokens": [
+      "mailcow/"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 05:00",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

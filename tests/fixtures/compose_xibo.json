@@ -1,0 +1,38 @@
+{
+  "name": "xibo",
+  "services": {
+    "cms-web": {
+      "image": "xibosignage/xibo-cms:release-4.0.0",
+      "environment": {
+        "MYSQL_HOST": "cms-db",
+        "MYSQL_USER": "cms",
+        "MYSQL_PASSWORD": "s3cret-app",
+        "MYSQL_DATABASE": "cms"
+      },
+      "volumes": [
+        {"type": "bind", "source": "/opt/xibo/shared/cms/custom", "target": "/var/www/cms/custom", "bind": {}},
+        {"type": "volume", "source": "library", "target": "/var/www/cms/library", "volume": {}}
+      ]
+    },
+    "cms-db": {
+      "image": "mysql:8.0",
+      "environment": {
+        "MYSQL_DATABASE": "cms",
+        "MYSQL_USER": "cms",
+        "MYSQL_PASSWORD": "s3cret-app",
+        "MYSQL_RANDOM_ROOT_PASSWORD": "yes"
+      },
+      "volumes": [
+        {"type": "bind", "source": "/opt/xibo/shared/db", "target": "/var/lib/mysql", "bind": {}}
+      ]
+    },
+    "cms-xmr": {
+      "image": "xibosignage/xibo-xmr:release-0.11",
+      "environment": {},
+      "volumes": []
+    }
+  },
+  "volumes": {
+    "library": {"name": "xibo_library"}
+  }
+}

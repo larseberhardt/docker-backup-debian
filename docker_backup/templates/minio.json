@@ -1,0 +1,15 @@
+{
+  "template_schema_version": 1,
+  "name": "minio",
+  "description": "MinIO (S3-compatible object storage, single-node/SNSD): backs up the data directory 'minio-data' directly at the file level including the internal metadata (.minio.sys: format.json, IAM/bucket/versioning config) and excludes only the transient directories .minio.sys/tmp and .minio.sys/multipart (only in-progress, unfinished uploads). No DB auto-detection (no SQL DB), no shell hooks. CONSISTENCY: A live backup is usually sufficient for a lightly used instance, but is NOT guaranteed to be crash-consistent (SNSD writes xl.meta partly in place and has no parity for self-healing); for strict consistency, briefly stop the MinIO container for the snapshot. RESTORE: requires the same MINIO_ROOT_USER/MINIO_ROOT_PASSWORD and - if set - the same MINIO_KMS_SECRET_KEY (lives in the compose env, NOT in minio-data; otherwise IAM is in plaintext in .minio.sys/config). Different volume name? Adjust the exclude prefix 'minio-data'.",
+  "match": {
+    "image_tokens": ["minio/minio", "quay.io/minio/minio"]
+  },
+  "db_autodetect": false,
+  "schedule": "daily 03:00",
+  "retention": {"daily": 7, "weekly": 4, "monthly": 6},
+  "exclude_patterns": [
+    "minio-data/.minio.sys/tmp",
+    "minio-data/.minio.sys/multipart"
+  ]
+}

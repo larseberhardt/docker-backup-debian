@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "yourls",
+  "description": "YOURLS (URL shortener, MySQL/MariaDB): DB auto-detection dumps the database (with MYSQL_RANDOM_ROOT_PASSWORD it falls back to the app user). All link data lives in MySQL; the stack folder only adds config/plugins. Restore = folder + dump import, then 'up -d'.",
+  "match": {
+    "image_tokens": [
+      "yourls"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 01:15",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

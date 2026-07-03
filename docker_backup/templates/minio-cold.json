@@ -1,0 +1,28 @@
+{
+  "template_schema_version": 1,
+  "name": "minio-cold",
+  "description": "MinIO (S3-compatible object storage, single-node/SNSD) - COLD variant with guaranteed consistency: stops the MinIO container via a pre-hook, then takes the restic snapshot with the data directory at rest (true crash consistency, no torn xl.meta) and restarts the container via a post-hook. The post-hook ALWAYS runs - even if the backup fails - so MinIO reliably comes back. Price: brief downtime during the snapshot. Use this variant for actively written instances; for lightly used ones 'minio' is enough (no hooks, no downtime). Hooks run as root and only after explicit approval ('--allow-hooks'). Assumption: the Compose service is named 'minio' and the volume lives under 'minio-data' (adjust the commands and exclude prefix if needed). RESTORE: requires the same MINIO_ROOT_USER/MINIO_ROOT_PASSWORD and - if set - the same MINIO_KMS_SECRET_KEY (lives in the compose env, NOT in minio-data).",
+  "db_autodetect": false,
+  "schedule": "daily 03:00",
+  "retention": {"daily": 7, "weekly": 4, "monthly": 6},
+  "exclude_patterns": [
+    "minio-data/.minio.sys/tmp",
+    "minio-data/.minio.sys/multipart"
+  ],
+  "hooks": {
+    "pre_backup": [
+      {
+        "cmd": "docker compose -f \"$DOCKER_BACKUP_COMPOSE_FILE\" stop minio",
+        "on_failure": "abort",
+        "name": "stop MinIO for a consistent cold snapshot"
+      }
+    ],
+    "post_backup": [
+      {
+        "cmd": "docker compose -f \"$DOCKER_BACKUP_COMPOSE_FILE\" start minio || docker compose -f \"$DOCKER_BACKUP_COMPOSE_FILE\" up -d minio",
+        "on_failure": "warn",
+        "name": "restart MinIO after the snapshot"
+      }
+    ]
+  }
+}

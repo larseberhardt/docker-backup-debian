@@ -1,0 +1,11 @@
+{
+  "template_schema_version": 1,
+  "name": "rocketchat",
+  "description": "Rocket.Chat (MongoDB): db_autodetect is OFF - MongoDB is not a SQL database, and mongodump cannot be relied on inside the official mongo image (the database tools were split out with 4.4). Consistency comes from the BUILT-IN quiesce instead: docker-backup detects the mongo service and freezes writes via db.fsyncLock ONLY around the file capture (named volume -> only during the tar step, before the restic upload), releasing in a finally. Reads keep working, no downtime, no --allow-hooks needed. Should the lock ever remain stuck after a hard abort, restarting the mongo container releases it.",
+  "match": {
+    "image_tokens": ["rocketchat/rocket.chat"]
+  },
+  "db_autodetect": false,
+  "schedule": "daily 03:30",
+  "retention": {"daily": 7, "weekly": 4, "monthly": 6}
+}

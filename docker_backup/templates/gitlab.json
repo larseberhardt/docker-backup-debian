@@ -1,0 +1,64 @@
+{
+  "template_schema_version": 1,
+  "name": "gitlab",
+  "description": "GitLab (Omnibus in a container): uses 'gitlab-backup create' for a consistent internal dump, backs up the stack folder WITHOUT the live data, and cleans up the internal dump afterwards. DB auto-detection is off (GitLab dumps itself).",
+  "match": {
+    "image_tokens": ["gitlab/gitlab-ce", "gitlab/gitlab-ee", "gitlab/gitlab"]
+  },
+  "db_autodetect": false,
+  "schedule": "daily 04:00",
+  "retention": {"daily": 7, "weekly": 0, "monthly": 0, "keep_within": "30d"},
+  "exclude_patterns": [
+    "gitlab/logs",
+    "gitlab-runner/runner/cache",
+    "gitlab-runner/dind",
+    "gitlab/data/.bundle",
+    "gitlab/data/.gitconfig",
+    "gitlab/data/.ssh",
+    "gitlab/data/alertmanager",
+    "gitlab/data/bootstrapped",
+    "gitlab/data/dind",
+    "gitlab/data/gitaly",
+    "gitlab/data/gitlab-ci",
+    "gitlab/data/gitlab-exporter",
+    "gitlab/data/gitlab-kas",
+    "gitlab/data/gitlab-rails",
+    "gitlab/data/gitlab-shell",
+    "gitlab/data/gitlab-workhorse",
+    "gitlab/data/logrotate",
+    "gitlab/data/nginx",
+    "gitlab/data/postgres-exporter",
+    "gitlab/data/postgresql",
+    "gitlab/data/postgresql-version.old",
+    "gitlab/data/prometheus",
+    "gitlab/data/public_attributes.json",
+    "gitlab/data/redis",
+    "gitlab/data/registry",
+    "gitlab/data/minio",
+    "gitlab/data/trusted-certs-directory-hash"
+  ],
+  "hooks": {
+    "pre_backup": [
+      {
+        "cmd": "docker exec gitlab gitlab-backup create CRON=1",
+        "on_failure": "abort",
+        "name": "gitlab-backup create"
+      }
+    ],
+    "post_backup": [
+      {
+        "cmd": "rm -f gitlab/data/backups/*.tar",
+        "on_failure": "warn",
+        "cwd": "stack",
+        "name": "clean up internal dump"
+      }
+    ],
+    "restore": [
+      {
+        "cmd": "docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-ctl stop sidekiq && docker exec gitlab gitlab-backup restore FORCE=yes && docker exec gitlab gitlab-ctl start",
+        "on_failure": "abort",
+        "name": "gitlab-backup restore"
+      }
+    ]
+  }
+}

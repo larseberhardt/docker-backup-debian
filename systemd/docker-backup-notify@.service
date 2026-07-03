@@ -1,0 +1,9 @@
+[Unit]
+Description=docker-backup failure notification for stack %i
+# Triggered automatically via OnFailure= from docker-backup@%i.service.
+
+[Service]
+Type=oneshot
+# Optional place for the SMTP password or similar (DOCKER_BACKUP_SMTP_PASSWORD=...)
+EnvironmentFile=-/etc/docker-backup/notify.env
+ExecStart=/usr/local/bin/docker-backup notify failure %i

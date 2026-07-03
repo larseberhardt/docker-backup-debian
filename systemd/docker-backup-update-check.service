@@ -1,0 +1,14 @@
+[Unit]
+Description=docker-backup update check (refresh version cache)
+Documentation=file:/opt/docker-backup/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# REMOTE_URL/BRANCH; '-' = file may be missing (then update.sh writes 'unconfigured')
+EnvironmentFile=-/etc/docker-backup/update.conf
+ExecStart=/opt/docker-backup/update.sh --refresh-cache
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=5m

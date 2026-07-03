@@ -1,0 +1,20 @@
+{
+  "template_schema_version": 1,
+  "name": "paperless",
+  "description": "Paperless-ngx (Postgres/MariaDB + Redis): DB auto-detection dumps the SQL DB; the Redis broker gets a BGSAVE checkpoint via the built-in quiesce (queue only - losing it is harmless). media/ (originals + archive PDFs) is the irreplaceable part and lives in the stack folder/volumes. data/index and the classifier model are regenerable ('document_index reindex' / retraining) but small, so they stay in the backup. Alternative portable export: 'document_exporter' as a pre-hook - not needed for a same-version restore. If the stack runs the postgres-backup-local sidecar, its rotating dump folder (./pgbackups) is excluded - docker-backup takes its own consistent dump. postgres:18+ mounts /var/lib/postgresql (parent layout); the raw data dir is excluded there as well - the dump replaces it.",
+  "match": {
+    "image_tokens": [
+      "paperless-ngx"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 04:15",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  },
+  "exclude_patterns": [
+    "/pgbackups"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "passbolt",
+  "description": "Passbolt (CE, MariaDB): DB auto-detection dumps the MariaDB. Since the root password is random (MYSQL_RANDOM_ROOT_PASSWORD), the database 'passbolt' is backed up as the app user 'passbolt'; the raw DB folder (./database_volume) is excluded - the logical dump replaces it. gpg/jwt may be bind mounts (./gpg_volume) or named volumes - both are captured (stack folder or volume tar). IMPORTANT - RESTORE: Passbolt encrypts with the OpenPGP server key. The volumes 'gpg_volume' (server private key) and 'jwt_volume' (JWT key pair) are ESSENTIAL, live in the stack folder and are therefore included in the backup - without them the restored DB is unusable (no login, no decryption). Back them up as well and restore them identically.",
+  "match": {
+    "image_tokens": [
+      "passbolt/passbolt"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 02:30",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

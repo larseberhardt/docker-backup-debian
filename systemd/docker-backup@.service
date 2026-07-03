@@ -1,0 +1,18 @@
+[Unit]
+Description=docker-backup for stack %i
+Documentation=file:/opt/docker-backup/README.md
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+# On failure (crash/timeout/exit!=0) trigger an email notification
+OnFailure=docker-backup-notify@%i.service
+
+[Service]
+Type=oneshot
+# Backend credentials (S3/B2/SFTP …) optional; '-' = file may be missing
+EnvironmentFile=-/etc/docker-backup/backends/%i.env
+ExecStart=/usr/local/bin/docker-backup run %i
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Backup can take a long time (large volumes / slow network share)
+TimeoutStartSec=12h

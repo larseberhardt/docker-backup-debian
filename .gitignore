@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Secrets & runtime state (must never be committed)
+*.key
+*.pem
+*.pw
+*.env
+update.conf
+.update-check.json
+notify.json
+backends/
+secrets/
+keys/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

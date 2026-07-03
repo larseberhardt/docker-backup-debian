@@ -1,0 +1,12 @@
+[Unit]
+Description=docker-backup daily update check
+
+[Timer]
+OnCalendar=daily
+# Spread across the server fleet so the git host is not hit simultaneously:
+RandomizedDelaySec=6h
+# Catch up if the server was off at the scheduled time:
+Persistent=true
+
+[Install]
+WantedBy=timers.target

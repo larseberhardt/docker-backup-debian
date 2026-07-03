@@ -1,0 +1,14 @@
+[Unit]
+Description=docker-backup integrity check of all stacks (restic check)
+Documentation=file:/opt/docker-backup/README.md
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+# Backend credentials are loaded per stack from /etc/docker-backup/backends/<name>.env
+# (no EnvironmentFile here, since this singleton checks all stacks).
+ExecStart=/usr/local/bin/docker-backup check --all --refresh-cache
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=6h

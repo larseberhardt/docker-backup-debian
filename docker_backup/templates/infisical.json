@@ -1,0 +1,20 @@
+{
+  "template_schema_version": 1,
+  "name": "infisical",
+  "description": "Infisical (self-hosted secrets manager): uses DB auto-detection for a transaction-consistent pg_dump of the Infisical DB as a clean, portable restore path. The raw Postgres volume 'pg_data' is replaced by the logical dump (not tarred); the regenerable Redis cache/queue 'redis_data' is excluded via pattern. No Supabase flavor needed (a single DB, no cluster roles - the fresh postgres container recreates the app role from the .env). IMPORTANT - RESTORE: Infisical encrypts the secrets in Postgres with ENCRYPTION_KEY (or ROOT_ENCRYPTION_KEY) and AUTH_SECRET from the '.env'. This '.env' lives in the stack folder and is part of the backup - it MUST be identical on restore, otherwise the secrets cannot be decrypted. This applies to the internal software encryption; an external KMS/HSM (AWS/GCP) lies outside the backup and must be backed up separately. Check that POSTGRES_DB matches the DB from DB_CONNECTION_URI; if you use AUDIT_LOGS_DB_CONNECTION_URI on a separate DB, back that up as well. Volume named differently? Adjust the 'redis_data' exclude.",
+  "match": {
+    "image_tokens": [
+      "infisical/infisical"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 01:00",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  },
+  "exclude_patterns": [
+    "/redis_data"
+  ]
+}

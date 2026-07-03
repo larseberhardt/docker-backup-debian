@@ -1,0 +1,22 @@
+{
+  "template_schema_version": 1,
+  "name": "nextcloud",
+  "description": "Nextcloud (Apache image, MariaDB): DB auto-detection dumps the MariaDB (root -> all databases). The app folder is backed up including config/ and data/ (the user files); the raw DB data dir is excluded - the logical dump replaces it. Only regenerable data is excluded: thumbnails (data/appdata_*/preview), user cache (data/*/cache) and unfinished chunk uploads (data/*/uploads). Assumption: datadirectory = /var/www/html/data (volume ./nextcloud) - adjust the excludes if the volume/data path differs. NOTE: For strictly consistent backups, enable maintenance mode before the backup (occ maintenance:mode --on) and disable it again afterwards.",
+  "match": {
+    "image_tokens": [
+      "nextcloud"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 02:00",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  },
+  "exclude_patterns": [
+    "nextcloud/data/appdata_*/preview",
+    "nextcloud/data/*/cache",
+    "nextcloud/data/*/uploads"
+  ]
+}

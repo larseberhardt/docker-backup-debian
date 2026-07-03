@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Launcher for docker-backup. Sets PYTHONPATH to the installation directory
+# and starts the Python package.
+set -euo pipefail
+
+# Resolve symlinks so /usr/local/bin/docker-backup -> /opt/docker-backup/bin/... works
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+HERE="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+ROOT="$(dirname "$HERE")"
+
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m docker_backup "$@"

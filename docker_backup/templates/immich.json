@@ -1,0 +1,15 @@
+{
+  "template_schema_version": 1,
+  "name": "immich",
+  "description": "Immich (photos/videos): db_autodetect is OFF - the DB uses the tensorchord/pgvecto-rs image (Postgres + vectors extension) and is deliberately NOT picked up by the generic Postgres detection. The stack folder is backed up: the original media (UPLOAD_LOCATION, default ./library) and the live Postgres folder (DB_DATA_LOCATION, default ./postgres) as a fallback. Regenerable derivatives library/thumbs and library/encoded-video are excluded. IMPORTANT: (1) If UPLOAD_LOCATION/DB_DATA_LOCATION point OUTSIDE the stack folder via .env, they must be backed up separately (docker-backup backs up the stack folder + named volumes). (2) For a clean, portable DB dump, use the pg_dumpall method documented by Immich or the bundled pgbackups sidecar; a file-level restore of the DB folder requires the exact same pgvecto-rs version. (3) The named volume 'model-cache' (ML models) is regenerable and can be removed from the volume plan.",
+  "match": {
+    "image_tokens": ["immich-app/immich"]
+  },
+  "db_autodetect": false,
+  "schedule": "daily 04:30",
+  "retention": {"daily": 7, "weekly": 4, "monthly": 6},
+  "exclude_patterns": [
+    "library/thumbs",
+    "library/encoded-video"
+  ]
+}

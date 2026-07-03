@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "invoiceninja",
+  "description": "Invoice Ninja (MySQL/MariaDB): DB auto-detection dumps the database; public/ and storage/ (uploaded logos, PDFs, backups) live in the stack folder and are included. CRITICAL: the APP_KEY in the .env encrypts fields in the DB - the .env is captured with the stack folder, but keep an offline copy too: a dump restored WITHOUT the matching APP_KEY makes encrypted values (e.g. gateway credentials) unreadable.",
+  "match": {
+    "image_tokens": [
+      "invoiceninja"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 03:15",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=docker-backup weekly integrity check (restic check)
+
+[Timer]
+OnCalendar=weekly
+# Spread across the server fleet so backup targets are not hit simultaneously:
+RandomizedDelaySec=6h
+# Catch up if the server was off at the scheduled time:
+Persistent=true
+
+[Install]
+WantedBy=timers.target

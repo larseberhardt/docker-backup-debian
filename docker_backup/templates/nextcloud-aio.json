@@ -1,0 +1,18 @@
+{
+  "template_schema_version": 1,
+  "name": "nextcloud-aio",
+  "description": "Nextcloud All-in-One - WARNING, SPECIAL CASE: the compose stack only contains the AIO master container. The actual Nextcloud/DB/Redis containers and their volumes (nextcloud_aio_*) are created by the master OUTSIDE this compose project - docker-backup CANNOT see them, so this stack backup does NOT contain your Nextcloud data. Use AIO's BUILT-IN borg backup (AIO interface -> Backup) for the data. What THIS backup captures and why it still matters: compose.yml and the mastercontainer volume with AIO's configuration.json - including the borg encryption password (key escrow!). db_autodetect is off; the doctor warning 'NO database will be captured' is correct and stays as a reminder.",
+  "match": {
+    "image_tokens": [
+      "nextcloud/all-in-one",
+      "nextcloud-releases/all-in-one"
+    ]
+  },
+  "db_autodetect": false,
+  "schedule": "daily 05:30",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}

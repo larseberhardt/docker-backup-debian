@@ -1,0 +1,17 @@
+{
+  "template_schema_version": 1,
+  "name": "plausible",
+  "description": "Plausible CE (Postgres + ClickHouse): DB auto-detection dumps the Postgres (accounts, sites, settings) - the important config data. The ClickHouse event store has NO dump support here and is captured as a live file copy: parts are written atomically, so the copy is usable, but events written during the backup window can be missing (crash-consistent) - for analytics data an accepted trade-off. The create warning about ClickHouse is expected. For a strictly consistent event backup use clickhouse-backup as a pre-hook.",
+  "match": {
+    "image_tokens": [
+      "plausible"
+    ]
+  },
+  "db_autodetect": true,
+  "schedule": "daily 04:45",
+  "retention": {
+    "daily": 7,
+    "weekly": 4,
+    "monthly": 6
+  }
+}
