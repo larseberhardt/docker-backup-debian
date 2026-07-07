@@ -157,5 +157,59 @@ class RunToFileVerifiesTest(unittest.TestCase):
         self.assertTrue(os.path.getsize(out) > 0)
 
 
+class MysqlEventsFallbackTest(unittest.TestCase):
+    """--events must be dropped and the dump retried when the event scheduler is disabled."""
+
+    def setUp(self):
+        util.set_dry_run(False)
+
+    def test_events_error_string_is_recognized(self):
+        err = ("mariadb-dump: Couldn't execute 'show events': Cannot proceed, because "
+               "event scheduler is disabled (1577)")
+        self.assertTrue(dbdump._is_event_scheduler_error(err))
+        self.assertTrue(dbdump._is_event_scheduler_error(err.encode("utf-8")))
+        self.assertFalse(dbdump._is_event_scheduler_error("some other failure"))
+
+    def test_cmd_toggles_events_flag(self):
+        with_events = dbdump._mysql_dump_cmd("mariadb-dump", "root", True, None, True)
+        without = dbdump._mysql_dump_cmd("mariadb-dump", "root", True, None, False)
+        self.assertIn("--events", with_events)
+        self.assertNotIn("--events", without)
+        self.assertEqual(with_events[-1], "--all-databases")
+
+    def test_retries_without_events_on_scheduler_error(self):
+        calls = []
+
+        def fake_run_to_file(argv, out_path, kind):
+            calls.append(argv)
+            if "--events" in argv:
+                raise util.CommandError(
+                    argv, 2,
+                    "mariadb-dump: Couldn't execute 'show events': Cannot proceed, "
+                    "because event scheduler is disabled (1577)")
+
+        db = {"service": "db", "auth_user": "root", "all_databases": True}
+        with mock.patch.object(dbdump, "_probe_tool", return_value="mariadb-dump"), \
+                mock.patch.object(dbdump, "_run_to_file", side_effect=fake_run_to_file), \
+                mock.patch.object(dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3]), \
+                mock.patch.object(dbdump.util, "warn"):
+            dbdump._dump_mysql(db, None, "c.yml", "/p", "proj", "/out/db.sql")
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--events", calls[0])
+        self.assertNotIn("--events", calls[1])
+
+    def test_other_errors_are_not_retried(self):
+        def fake_run_to_file(argv, out_path, kind):
+            raise util.CommandError(argv, 1, "Access denied for user 'root'")
+
+        db = {"service": "db", "auth_user": "root", "all_databases": True}
+        with mock.patch.object(dbdump, "_probe_tool", return_value="mariadb-dump"), \
+                mock.patch.object(dbdump, "_run_to_file", side_effect=fake_run_to_file), \
+                mock.patch.object(dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3]):
+            with self.assertRaises(util.CommandError):
+                dbdump._dump_mysql(db, None, "c.yml", "/p", "proj", "/out/db.sql")
+
+
 if __name__ == "__main__":
     unittest.main()

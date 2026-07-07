@@ -51,30 +51,60 @@ def dump(
         raise util.CommandError(["dump"], 1, "Unknown engine: %s" % db["engine"])
 
 
+def _mysql_dump_cmd(tool, auth_user, all_databases, databases, with_events):
+    """Builds the mysqldump/mariadb-dump argv. ``with_events`` toggles ``--events``
+    so the caller can retry without it (see :func:`_dump_mysql`)."""
+    # CAUTION: do NOT add --compact/--skip-comments/--skip-dump-date — they strip the
+    # "-- Dump completed" footer that _verify_dump_file uses to detect completeness;
+    # without it every valid MySQL dump would be wrongly treated as truncated and abort.
+    cmd = [tool, "--single-transaction", "--quick", "--routines", "--triggers"]
+    if with_events:
+        cmd += ["--events"]
+    cmd += ["--default-character-set=utf8mb4", "-h", "127.0.0.1", "-u", auth_user]
+    if all_databases:
+        cmd += ["--all-databases"]
+    else:
+        cmd += ["--databases"] + (databases or [])
+    return cmd
+
+
+# mariadb-dump/mysqldump abort on ``SHOW EVENTS`` with error 1577 when the server's event
+# scheduler is disabled (the MariaDB default: event_scheduler=OFF/DISABLED). --events then
+# makes the whole dump fail even though there is nothing to dump. Detect exactly that case
+# and retry once without --events instead of failing the backup.
+def _is_event_scheduler_error(stderr) -> bool:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    low = (stderr or "").lower()
+    return "event scheduler is disabled" in low or (
+        "show events" in low and "1577" in low)
+
+
 def _dump_mysql(db, password, compose_file, project_dir, project_name, out_path) -> None:
     tool = _probe_tool(
         compose_file, project_dir, db["service"],
         ["mariadb-dump", "mysqldump"], project_name,
     ) or "mysqldump"
-    # CAUTION: do NOT add --compact/--skip-comments/--skip-dump-date — they strip the
-    # "-- Dump completed" footer that _verify_dump_file uses to detect completeness;
-    # without it every valid MySQL dump would be wrongly treated as truncated and abort.
-    cmd = [
-        tool, "--single-transaction", "--quick", "--routines", "--triggers", "--events",
-        "--default-character-set=utf8mb4", "-h", "127.0.0.1", "-u", db["auth_user"],
-    ]
-    if db.get("all_databases"):
-        cmd += ["--all-databases"]
-    else:
-        dbs = db.get("databases") or []
-        cmd += ["--databases"] + dbs
     env = {}  # type: Dict[str, str]
     if password:
         env["MYSQL_PWD"] = password
         util.register_secret(password)
-    argv = compose.exec_args(compose_file, project_dir, db["service"], cmd,
-                             env=env, tty=False, project_name=project_name)
-    _run_to_file(argv, out_path, "mysql")
+
+    def run(with_events):
+        cmd = _mysql_dump_cmd(tool, db["auth_user"], db.get("all_databases"),
+                              db.get("databases"), with_events)
+        argv = compose.exec_args(compose_file, project_dir, db["service"], cmd,
+                                 env=env, tty=False, project_name=project_name)
+        _run_to_file(argv, out_path, "mysql")
+
+    try:
+        run(with_events=True)
+    except util.CommandError as exc:
+        if not _is_event_scheduler_error(exc.stderr):
+            raise
+        util.warn("mariadb-dump: event scheduler is disabled — retrying dump without "
+                  "--events (no scheduled events to back up).")
+        run(with_events=False)
 
 
 # --- Postgres: file layout + argv builder (pure, testable without Docker) ----
@@ -265,8 +295,19 @@ def _run_to_file(argv: List[str], out_path: str, kind: str) -> None:
     # 0600: the dump is the complete plaintext database — never world-readable
     # (default umask would give 0644).
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        util.run(argv, stdout=fh, text=False, capture=False, mutating=False)
+    # capture=True keeps the dump tool's stderr (stdout still goes to the file) so the
+    # CommandError carries it — callers inspect it (e.g. the --events fallback in
+    # _dump_mysql), and on failure we surface it explicitly since it no longer streams live.
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            util.run(argv, stdout=fh, text=False, capture=True, mutating=False)
+    except util.CommandError as exc:
+        stderr = exc.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        for line in (stderr or "").strip().splitlines():
+            util.warn(line)
+        raise
     # rc=0 does NOT mean "complete": a truncated/empty dump must not end up in the snapshot
     # as a success (the only previous safeguard was the exit code).
     _verify_dump_file(out_path, kind)
