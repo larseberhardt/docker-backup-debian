@@ -91,6 +91,10 @@ class CommandError(RuntimeError):
     def __init__(self, argv, returncode, stderr=""):
         self.argv = list(argv)
         self.returncode = returncode
+        # stderr may arrive as bytes (from a text=False capture, e.g. binary DB dumps).
+        # Always keep it as str so callers can .strip()/concatenate it safely.
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
         self.stderr = stderr or ""
         super().__init__(
             "command failed (rc=%s): %s" % (returncode, scrub(fmt_argv(self.argv)))

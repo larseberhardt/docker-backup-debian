@@ -211,5 +211,20 @@ class MysqlEventsFallbackTest(unittest.TestCase):
                 dbdump._dump_mysql(db, None, "c.yml", "/p", "proj", "/out/db.sql")
 
 
+class CommandErrorStderrTest(unittest.TestCase):
+    """stderr captured from a binary (text=False) run arrives as bytes; CommandError must
+    normalize it to str so the error path (util.error(exc.stderr.strip())) does not crash."""
+
+    def test_bytes_stderr_is_decoded(self):
+        exc = util.CommandError(["mariadb-dump"], 2, b"proc corrupted (1728)")
+        self.assertEqual(exc.stderr, "proc corrupted (1728)")
+        # must be concatenable like in util.error("[ERROR] " + msg)
+        self.assertEqual("[ERROR] " + exc.stderr.strip(), "[ERROR] proc corrupted (1728)")
+
+    def test_str_stderr_is_preserved(self):
+        exc = util.CommandError(["x"], 1, "plain text")
+        self.assertEqual(exc.stderr, "plain text")
+
+
 if __name__ == "__main__":
     unittest.main()
