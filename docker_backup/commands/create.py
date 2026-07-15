@@ -346,7 +346,7 @@ def _build_db_services(
         auth_user = dump_user or creds["user"]
         do_globals = creds.get("dump_globals", False) if dump_globals is None else dump_globals
         password_source = _resolve_password_source(name, dbs, creds, interactive)
-        out.append({
+        entry = {
             "service": dbs["service"],
             "engine": dbs["engine"],
             "auth_user": auth_user,
@@ -356,11 +356,18 @@ def _build_db_services(
             "password_source": password_source,
             "data_dir_target": compose.primary_db_data_dir(dbs["engine"]),
             "raw_data_exclude": None,
-        })
+        }
+        if creds.get("database_scope"):
+            entry["database_scope"] = creds["database_scope"]
+        out.append(entry)
         extra = ""
         if dbs.get("flavor"):
             extra += ", flavor: %s" % dbs["flavor"]
-        if len(creds["databases"]) > 1 or do_globals:
+        if creds.get("database_scope"):
+            extra += ", scope: all non-system DBs (seed: %s)" % (
+                "+".join(creds["databases"]) or "none"
+            )
+        elif len(creds["databases"]) > 1 or do_globals:
             extra += ", DBs: %s%s" % (
                 "+".join(creds["databases"]),
                 " +globals" if do_globals else "",
@@ -391,6 +398,10 @@ def _resolve_password_source(name, dbs, creds, interactive) -> str:
 def _assemble_config(**k) -> Dict[str, Any]:
     return {
         "schema_version": config.SCHEMA_VERSION,
+        # v2 enumerates a portable non-system MySQL/MariaDB scope at dump time.
+        # Absence identifies configs created by the legacy all-DB detector so
+        # run.py can fail closed until an explicit refresh.
+        "db_scope_version": config.DB_SCOPE_VERSION,
         "name": k["name"],
         "stack_path": k["stack_path"],
         "compose_file": k["compose_file"],

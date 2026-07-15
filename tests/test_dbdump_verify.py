@@ -7,7 +7,7 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from docker_backup import dbdump, util
+from docker_backup import dbdump, detect, util
 
 
 # Real modern pg_dump output (14+/17): \restrict prolog AFTER the header and a
@@ -39,6 +39,10 @@ _PG_GLOBALS = (
     "ALTER ROLE postgres WITH SUPERUSER;\n\n"
     "--\n-- PostgreSQL database cluster dump complete\n--\n"
 )
+
+
+def _mysql_hex_names(*names):
+    return "\n".join(name.encode("utf-8").hex() for name in names) + "\n"
 _MYSQL_COMPLETE = (
     "-- MySQL dump\n\nCREATE TABLE `t` (`id` int);\nINSERT INTO `t` VALUES (1);\n"
     "-- Dump completed on 2026-07-01 03:00:00\n"
@@ -176,6 +180,168 @@ class MysqlEventsFallbackTest(unittest.TestCase):
         self.assertIn("--events", with_events)
         self.assertNotIn("--events", without)
         self.assertEqual(with_events[-1], "--all-databases")
+
+    def test_scoped_root_dump_names_only_the_application_database(self):
+        cmd = dbdump._mysql_dump_cmd(
+            "mariadb-dump", "root", False, ["snipeit"], True,
+        )
+        self.assertNotIn("--all-databases", cmd)
+        self.assertEqual(cmd[-2:], ["--databases", "snipeit"])
+
+    def test_persisted_dynamic_scope_is_complete_if_v103_ignores_marker(self):
+        creds = detect.extract_credentials({
+            "MYSQL_ROOT_PASSWORD": "secret", "MYSQL_DATABASE": "snipeit",
+        }, "mysql")
+
+        # v1.0.3 does not understand database_scope and feeds only the legacy
+        # fields into this builder. It must over-include system schemas rather
+        # than silently omit additional user databases created after setup.
+        cmd = dbdump._mysql_dump_cmd(
+            "mariadb-dump", creds["user"], creds["all_databases"],
+            creds["databases"], True,
+        )
+
+        self.assertEqual(creds["database_scope"], "non-system")
+        self.assertIn("--all-databases", cmd)
+        self.assertNotIn("--databases", cmd)
+
+    def test_show_databases_parser_keeps_all_user_databases(self):
+        names = dbdump._parse_mysql_database_names(
+            _mysql_hex_names(
+                "information_schema", "mysql", "ndbinfo", "performance_schema",
+                "snipeit", "audit", "sys",
+            )
+        )
+        self.assertEqual(names, ["audit", "snipeit"])
+
+    def test_show_databases_parser_rejects_empty_user_scope(self):
+        with self.assertRaises(util.CommandError):
+            dbdump._parse_mysql_database_names(
+                _mysql_hex_names("mysql", "sys", "performance_schema", "ndbinfo")
+            )
+
+    def test_show_databases_parser_fails_closed_on_unsafe_names(self):
+        for output in (
+            "not-hex\n",
+            _mysql_hex_names("bad\nname"),
+            _mysql_hex_names("-option"),
+            _mysql_hex_names("path/name"),
+            _mysql_hex_names("path\\name"),
+        ):
+            with self.subTest(output=output):
+                with self.assertRaises(util.CommandError):
+                    dbdump._parse_mysql_database_names(output)
+
+    def test_system_filter_is_exact_and_user_names_are_deduplicated(self):
+        names = dbdump._parse_mysql_database_names(
+            _mysql_hex_names("mysql", "MYSQL", "app", "app")
+        )
+        self.assertEqual(names, ["MYSQL", "app"])
+
+    def test_show_databases_parser_rejects_more_than_manifest_limit(self):
+        with self.assertRaises(util.CommandError):
+            dbdump._parse_mysql_database_names(
+                _mysql_hex_names(*("db%d" % i for i in range(65)))
+            )
+
+    def test_runtime_enumeration_uses_password_env_and_requires_seed(self):
+        db = {"service": "db", "auth_user": "root", "databases": ["snipeit"]}
+        with mock.patch.object(dbdump, "_probe_tool", return_value="mariadb"), \
+                mock.patch.object(
+                    dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3],
+                ) as exec_args, mock.patch.object(
+                    dbdump.util, "run",
+                    return_value=mock.Mock(
+                        stdout=_mysql_hex_names("mysql", "snipeit", "audit", "sys")
+                    ),
+                ):
+            names = dbdump._mysql_non_system_databases(
+                db, "secret", "c.yml", "/p", "proj",
+            )
+        self.assertEqual(names, ["audit", "snipeit"])
+        self.assertEqual(exec_args.call_args.kwargs["env"], {"MYSQL_PWD": "secret"})
+        query = exec_args.call_args.args[3]
+        self.assertNotIn("--raw", query)
+        self.assertIn(
+            "SELECT HEX(SCHEMA_NAME) FROM information_schema.SCHEMATA", query[-1],
+        )
+        self.assertIn("ORDER BY SCHEMA_NAME", query[-1])
+
+        with mock.patch.object(dbdump, "_probe_tool", return_value="mysql"), \
+                mock.patch.object(dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3]), \
+                mock.patch.object(
+                    dbdump.util, "run",
+                    return_value=mock.Mock(stdout=_mysql_hex_names("mysql", "other")),
+                ):
+            with self.assertRaises(util.CommandError):
+                dbdump._mysql_non_system_databases(
+                    db, "secret", "c.yml", "/p", "proj",
+                )
+
+    def test_dynamic_non_system_scope_is_exactly_bound_to_dump_plan(self):
+        calls = []
+
+        def fake_run_to_file(argv, out_path, kind, **kwargs):
+            calls.append(argv)
+
+        db = {
+            "service": "db", "auth_user": "root", "all_databases": True,
+            "databases": ["snipeit"], "database_scope": "non-system",
+        }
+        with mock.patch.object(
+                    dbdump, "_mysql_non_system_databases",
+                    return_value=["snipeit", "audit"],
+                ), mock.patch.object(dbdump, "_probe_tool", return_value="mariadb-dump"), \
+                mock.patch.object(dbdump, "_run_to_file", side_effect=fake_run_to_file), \
+                mock.patch.object(dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3]), \
+                mock.patch.object(dbdump.util, "info"):
+            dbdump._dump_mysql(db, "pw", "c.yml", "/p", "proj", "/out/db.sql")
+
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--all-databases", calls[0])
+        index = calls[0].index("--databases")
+        self.assertEqual(calls[0][index + 1:], ["snipeit", "audit"])
+        self.assertEqual(db["databases"], ["snipeit", "audit"])
+        self.assertNotIn("database_scope", db)
+
+    def test_dynamic_scope_is_enumerated_once_across_events_retry(self):
+        calls = []
+
+        def fake_run_to_file(argv, out_path, kind, **kwargs):
+            calls.append(argv)
+            if "--events" in argv:
+                raise util.CommandError(argv, 2, "event scheduler is disabled (1577)")
+
+        db = {
+            "service": "db", "auth_user": "root", "all_databases": True,
+            "databases": [], "database_scope": "non-system",
+        }
+        with mock.patch.object(
+                    dbdump, "_mysql_non_system_databases",
+                    return_value=["app", "audit"],
+                ) as enumerate_dbs, mock.patch.object(
+                    dbdump, "_probe_tool", return_value="mariadb-dump",
+                ), mock.patch.object(
+                    dbdump, "_run_to_file", side_effect=fake_run_to_file,
+                ), mock.patch.object(
+                    dbdump.compose, "exec_args", side_effect=lambda *a, **k: a[3],
+                ), mock.patch.object(dbdump.util, "warn"), \
+                mock.patch.object(dbdump.util, "info"):
+            dbdump._dump_mysql(db, None, "c.yml", "/p", "proj", "/out/db.sql")
+        enumerate_dbs.assert_called_once()
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(call[call.index("--databases") + 1:], ["app", "audit"])
+
+    def test_unknown_dynamic_scope_is_rejected_before_dump(self):
+        db = {
+            "service": "db", "auth_user": "root", "all_databases": False,
+            "databases": ["app"], "database_scope": "mystery",
+        }
+        with mock.patch.object(dbdump, "_run_to_file") as run_to_file:
+            with self.assertRaises(util.CommandError):
+                dbdump._dump_mysql(db, None, "c.yml", "/p", "proj", "/out/db.sql")
+        run_to_file.assert_not_called()
 
     def test_retries_without_events_on_scheduler_error(self):
         calls = []

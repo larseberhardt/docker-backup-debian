@@ -74,6 +74,16 @@ class DeriveTest(unittest.TestCase):
             self.assertNotIn("password", db)
             self.assertEqual(db["password_source"], "env:POSTGRES_PASSWORD")
 
+    def test_rejects_unresolved_dynamic_mysql_scope(self):
+        cfg = _sample_cfg()
+        cfg["db_services"] = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": False, "databases": ["app"],
+            "database_scope": "non-system",
+        }]
+        with self.assertRaisesRegex(ValueError, "must be resolved"):
+            _derive(cfg)
+
     def test_never_includes_hooks_or_shell(self):
         cfg = _sample_cfg()
         cfg["hooks"] = {

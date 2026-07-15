@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from .. import compose, config, dbdump, hooks, manifest, notify, quiesce, restic, runtime, status, util, volumes
+from .. import compose, config, dbdump, detect, hooks, manifest, notify, quiesce, restic, runtime, status, util, volumes
 
 
 @dataclass
@@ -131,6 +131,7 @@ def _do_run(cfg: Dict[str, Any]) -> str:
     # the logical dump.
     db_services = cfg.get("db_services") or []
     cj = compose.config_json(compose_file, stack, project)
+    _verify_mysql_db_scope(cfg, cj)
     _verify_backup_db_excludes(
         cfg.get("exclude_paths") or [], db_services, cj,
     )
@@ -284,6 +285,13 @@ def _dump_one(cfg, db, cj, dumps_dir, *, dumps_fd=None) -> None:
     try:
         if not dbdump.wait_ready(db, password, compose_file, stack, project, timeout=120):
             util.warn("DB '%s' did not become ready in time; dump may fail." % db["service"])
+        if (util.DRY_RUN and started and db.get("engine") == "mysql"
+                and db.get("database_scope") == "non-system"):
+            util.info(
+                "DRY-RUN: would enumerate all non-system databases and dump "
+                "them after temporarily starting service '%s'." % db["service"]
+            )
+            return
         dbdump.dump(
             db, password, compose_file, stack, project, dumps_dir,
             dumps_fd=dumps_fd,
@@ -311,6 +319,63 @@ def _extra_paths(cfg: Dict[str, Any]) -> List[str]:
             % ", ".join(missing),
         )
     return extra
+
+
+def _verify_mysql_db_scope(cfg: Dict[str, Any], cj: Dict[str, Any]) -> None:
+    """Reject unstamped legacy MySQL auto-detection when the current detector
+    can use the portable non-system scope.
+
+    Updating the program cannot safely rewrite an existing config: an operator
+    may deliberately have created extra databases that are not declared in
+    Compose.  Therefore legacy configs fail before hooks/staging and require the
+    explicit, reviewable ``set --refresh-db-detection`` migration.  Configs made
+    or refreshed with the current detector carry ``db_scope_version=2``; an
+    intentional cluster-wide dump there remains valid.
+    """
+    if not cfg.get("db_autodetect", True):
+        return
+    version = cfg.get("db_scope_version")
+    if isinstance(version, int) and not isinstance(version, bool) \
+            and version >= config.DB_SCOPE_VERSION:
+        return
+
+    detected = {
+        item.get("service"): item
+        for item in detect.find_db_services(cj)
+        if isinstance(item, dict) and item.get("service")
+    }
+    for stored in cfg.get("db_services") or []:
+        if not isinstance(stored, dict):
+            continue
+        if stored.get("engine") != "mysql":
+            continue
+        # A backported non-system marker is already safe without the top-level
+        # version stamp. Every other legacy plan must be reviewed: --all-
+        # databases includes system schemas, while a static list can silently
+        # omit additional user databases created after initial setup.
+        if stored.get("database_scope") == "non-system":
+            continue
+        current = detected.get(stored.get("service"))
+        if not current:
+            continue
+        creds = detect.extract_credentials(
+            current.get("environment"), "mysql", current.get("flavor"),
+        )
+        if not creds or creds.get("database_scope") != "non-system":
+            continue
+        name = cfg.get("name") or "<name>"
+        seed = ",".join(creds.get("databases") or [])
+        detail = (
+            " (configured application seed: %s)" % seed if seed else ""
+        )
+        raise util.CommandError(
+            ["backup", "db-scope"], 1,
+            "Legacy MySQL scope for service '%s' cannot guarantee a complete, "
+            "portable set of user databases%s. "
+            "Review and persist the safe scope first: docker-backup set %s "
+            "--refresh-db-detection"
+            % (stored.get("service"), detail, name),
+        )
 
 
 def _verified_backup_named_volumes(

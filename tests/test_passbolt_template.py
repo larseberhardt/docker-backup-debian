@@ -38,8 +38,9 @@ class PassboltTemplateTest(unittest.TestCase):
         creds = detect.extract_credentials(env, "mysql")
         self.assertEqual(creds["user"], "passbolt")
         self.assertEqual(creds["source"], "app")
-        self.assertFalse(creds["all_databases"])
+        self.assertTrue(creds["all_databases"])
         self.assertEqual(creds["databases"], ["passbolt"])
+        self.assertEqual(creds["database_scope"], "non-system")
 
 
 if __name__ == "__main__":

@@ -60,10 +60,15 @@ def _image_engine(image: Optional[str]) -> Optional[str]:
 
 
 def _image_flavor(image: Optional[str]) -> Optional[str]:
-    """Detects distributions that need special handling. Currently only Supabase."""
+    """Detect distributions whose environment semantics need special handling."""
     name = _image_name(image)
     if "supabase/postgres" in name or name.split("/", 1)[0] == "supabase":
         return "supabase"
+    base = name.rsplit("/", 1)[-1]
+    if _has_token(base, "mariadb"):
+        return "mariadb"
+    if any(_has_token(base, token) for token in ("mysql", "percona")):
+        return "mysql"
     return None
 
 
@@ -185,6 +190,38 @@ def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _mysql_env_value(
+    env: Dict[str, str], mysql_key: str, mariadb_key: str,
+    flavor: Optional[str],
+) -> tuple:
+    """Resolve equivalent MYSQL_/MARIADB_ variables according to the image.
+
+    MariaDB images give MARIADB_* precedence while MySQL/Percona use MYSQL_*.
+    Without image context, conflicting non-empty aliases are ambiguous and must
+    fail closed now that the value can define the complete backup scope.
+    """
+    mysql_value = env.get(mysql_key)
+    mariadb_value = env.get(mariadb_key)
+    if flavor == "mariadb":
+        if mariadb_value:
+            return mariadb_value, mariadb_key
+        return mysql_value, mysql_key if mysql_value else None
+    if flavor == "mysql":
+        if mysql_value:
+            return mysql_value, mysql_key
+        return mariadb_value, mariadb_key if mariadb_value else None
+    if mysql_value and mariadb_value and mysql_value != mariadb_value:
+        raise ValueError(
+            "Conflicting %s and %s without MySQL/MariaDB image context"
+            % (mysql_key, mariadb_key)
+        )
+    if mysql_value:
+        return mysql_value, mysql_key
+    if mariadb_value:
+        return mariadb_value, mariadb_key
+    return None, None
+
+
 def extract_credentials(
     env: Optional[Dict[str, str]], engine: str, flavor: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
@@ -192,60 +229,76 @@ def extract_credentials(
 
     Return fields: engine, user, password, password_env_key, all_databases,
     databases, dump_globals, source ('root'|'app'|'postgres'|'supabase'|'unknown').
-    ``flavor`` ('supabase') enables multi-DB dumps + cluster globals (roles).
+    ``flavor`` selects image-specific environment precedence (MariaDB/MySQL) or
+    enables Supabase multi-DB dumps + cluster globals (roles).
     The password itself is only returned here for the interactive wizard;
     ``password_env_key`` is persisted instead (see runtime.resolve_password).
     """
     env = env or {}
 
     if engine == "mysql":
-        root_pw = env.get("MYSQL_ROOT_PASSWORD") or env.get("MARIADB_ROOT_PASSWORD")
-        root_key = "MYSQL_ROOT_PASSWORD" if env.get("MYSQL_ROOT_PASSWORD") else (
-            "MARIADB_ROOT_PASSWORD" if env.get("MARIADB_ROOT_PASSWORD") else None
+        root_pw, root_key = _mysql_env_value(
+            env, "MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD", flavor,
         )
-        random_root = _truthy(
-            env.get("MYSQL_RANDOM_ROOT_PASSWORD")
-            or env.get("MARIADB_RANDOM_ROOT_PASSWORD")
-            or ""
+        random_value, _random_key = _mysql_env_value(
+            env, "MYSQL_RANDOM_ROOT_PASSWORD", "MARIADB_RANDOM_ROOT_PASSWORD", flavor,
         )
-        app_user = env.get("MYSQL_USER") or env.get("MARIADB_USER")
-        app_pw = env.get("MYSQL_PASSWORD") or env.get("MARIADB_PASSWORD")
-        app_key = "MYSQL_PASSWORD" if env.get("MYSQL_PASSWORD") else (
-            "MARIADB_PASSWORD" if env.get("MARIADB_PASSWORD") else None
+        random_root = _truthy(random_value or "")
+        app_user, _app_user_key = _mysql_env_value(
+            env, "MYSQL_USER", "MARIADB_USER", flavor,
         )
-        app_db = env.get("MYSQL_DATABASE") or env.get("MARIADB_DATABASE")
+        app_pw, app_key = _mysql_env_value(
+            env, "MYSQL_PASSWORD", "MARIADB_PASSWORD", flavor,
+        )
+        app_db, _app_db_key = _mysql_env_value(
+            env, "MYSQL_DATABASE", "MARIADB_DATABASE", flavor,
+        )
 
-        # root only if a real root password is present and NOT random
+        # Keep every MySQL/MariaDB dump scoped to NON-SYSTEM databases.  The
+        # exact set is enumerated at dump time, so later-created user databases
+        # are included while image-owned schemas are not imported into a freshly
+        # initialized container. MYSQL_DATABASE is a required seed when present,
+        # not an assertion that it is the only user database.  Keep
+        # all_databases=True in the persisted representation for rollback safety:
+        # v1.0.3 ignores database_scope, so it will over-include system schemas
+        # rather than silently omit additional user databases.  The current
+        # runtime replaces this with the exact non-system list before dumping.
         if root_pw and not random_root:
-            return {
+            result = {
                 "engine": "mysql",
                 "user": "root",
                 "password": root_pw,
                 "password_env_key": root_key,
                 "all_databases": True,
-                "databases": [],
+                "databases": [app_db] if app_db else [],
+                "database_scope": "non-system",
                 "source": "root",
             }
+            return result
         # fall back to the app user (e.g. with MYSQL_RANDOM_ROOT_PASSWORD=yes)
         if app_user and app_pw:
-            return {
+            result = {
                 "engine": "mysql",
                 "user": app_user,
                 "password": app_pw,
                 "password_env_key": app_key,
-                "all_databases": False,
+                "all_databases": True,
                 "databases": [app_db] if app_db else [],
+                "database_scope": "non-system",
                 "source": "app",
             }
-        return {
+            return result
+        result = {
             "engine": "mysql",
             "user": app_user or "root",
             "password": None,
             "password_env_key": None,
-            "all_databases": not bool(app_db),
+            "all_databases": True,
             "databases": [app_db] if app_db else [],
+            "database_scope": "non-system",
             "source": "unknown",
         }
+        return result
 
     if engine == "postgres":
         pw = env.get("POSTGRES_PASSWORD")

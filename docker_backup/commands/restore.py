@@ -505,6 +505,41 @@ def _template_config_mismatch(
     return None
 
 
+def _enable_target_mysql_scope(
+    db_services: list, cj: Dict[str, Any],
+) -> None:
+    """Rebuild future MySQL scope from the authenticated target Compose model.
+
+    The manifest database list is the exact import plan for one snapshot.  It
+    must not become a permanent required-seed list: an additional database may
+    legitimately be deleted after the restore.  Only Compose-declared seeds are
+    retained; every other visible user database is discovered at backup time.
+    """
+    detected_db_services = {
+        item["service"]: item for item in detect.find_db_services(cj)
+    }
+    for db in db_services:
+        if db.get("engine") != "mysql":
+            continue
+        current = detected_db_services.get(db.get("service"))
+        if not current or current.get("engine") != "mysql":
+            raise util.CommandError(
+                ["--save-config", "db-detection"], 1,
+                "Cannot re-detect MySQL service '%s' in restored Compose."
+                % db.get("service"),
+            )
+        creds = detect.extract_credentials(
+            current.get("environment"), "mysql", current.get("flavor"),
+        )
+        # Rollback-safe persisted representation: current versions resolve the
+        # marker to an exact non-system list before dumping; v1.0.3 ignores the
+        # marker and therefore over-includes system schemas instead of silently
+        # omitting user databases created after this Compose seed.
+        db["all_databases"] = True
+        db["databases"] = list((creds or {}).get("databases") or [])
+        db["database_scope"] = "non-system"
+
+
 def _save_restored_config(
     cfg: Dict[str, Any], name: str, dest: str, *, dest_fd: Optional[int] = None,
     compose_fd: Optional[int] = None, external_fds: Optional[list] = None,
@@ -568,6 +603,13 @@ def _save_restored_config(
             ["--save-config"], 1,
             "Exact local template metadata was not retained for config reconstruction.",
         )
+    db_autodetect = bool(resolved_template.get("db_autodetect", True))
+    if db_autodetect:
+        # Re-enable the current local source-side policy for future MySQL
+        # backups. Required seeds come only from the restored Compose model
+        # authenticated inside the encrypted snapshot, never from the mutable
+        # plaintext manifest's exact one-snapshot import list.
+        _enable_target_mysql_scope(db_services, cj)
     schedule_input = resolved_template.get("schedule") or config.DEFAULT_SCHEDULE_INPUT
     if (not isinstance(schedule_input, str) or not schedule_input.strip()
             or len(schedule_input) > 200
@@ -602,6 +644,7 @@ def _save_restored_config(
     )
     saved = {
         "schema_version": config.SCHEMA_VERSION,
+        "db_scope_version": config.DB_SCOPE_VERSION,
         "name": name,
         "stack_path": dest,
         "compose_file": compose_file,
@@ -623,7 +666,7 @@ def _save_restored_config(
         # Template-owned safe defaults come from the reviewed local template,
         # not from the mutable plaintext sidecar.
         "exclude_patterns": list(resolved_template.get("exclude_patterns") or []),
-        "db_autodetect": bool(resolved_template.get("db_autodetect", True)),
+        "db_autodetect": db_autodetect,
         "hooks": hooks_dict,
         "hooks_allowed": bool(cfg.get("hooks_allowed", False)),
         "hooks_fingerprint": cfg.get("hooks_fingerprint"),

@@ -7,7 +7,7 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from docker_backup import util
+from docker_backup import config, util
 from docker_backup.commands import run as run_cmd
 
 
@@ -67,6 +67,75 @@ class RunWritesManifestTest(unittest.TestCase):
         self.manifest_write.assert_called_once_with(cfg, _SNAPSHOT_ID, [])
         # Order: first restic.backup, then manifest.write.
         self.assertTrue(run_cmd.restic.backup.called)
+
+    def test_dynamic_mysql_scope_is_resolved_before_manifest_write(self):
+        cfg = _cfg("snipeit")
+        cfg["db_scope_version"] = config.DB_SCOPE_VERSION
+        cfg["db_services"] = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": True, "databases": ["snipeit"],
+            "database_scope": "non-system",
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+            "data_dir_target": "/var/lib/mysql", "raw_data_exclude": None,
+        }]
+        cj = {"name": "snipeit", "services": {"db": {
+            "image": "mariadb:10.7",
+            "environment": {
+                "MYSQL_ROOT_PASSWORD": "secret", "MYSQL_DATABASE": "snipeit",
+            },
+            "volumes": [],
+        }}, "volumes": {}}
+        config.save(cfg)
+        runtime_cfg = config.load("snipeit")
+
+        with mock.patch.object(run_cmd.compose, "config_json", return_value=cj), \
+                mock.patch.object(run_cmd.compose, "service_running", return_value=True), \
+                mock.patch.object(run_cmd.dbdump, "wait_ready", return_value=True), \
+                mock.patch.object(
+                    run_cmd.dbdump, "_mysql_non_system_databases",
+                    return_value=["snipeit", "audit"],
+                ) as enumerate_dbs, mock.patch.object(
+                    run_cmd.dbdump, "_probe_tool", return_value="mariadb-dump",
+                ), mock.patch.object(
+                    run_cmd.compose, "exec_args", side_effect=lambda *a, **k: a[3],
+                ):
+            run_cmd._do_run(runtime_cfg)
+
+        enumerate_dbs.assert_called_once()
+        written_cfg = self.manifest_write.call_args.args[0]
+        db = written_cfg["db_services"][0]
+        self.assertEqual(db["databases"], ["snipeit", "audit"])
+        self.assertFalse(db["all_databases"])
+        self.assertNotIn("database_scope", db)
+        persisted_db = config.load("snipeit")["db_services"][0]
+        self.assertTrue(persisted_db["all_databases"])
+        self.assertEqual(persisted_db["databases"], ["snipeit"])
+        self.assertEqual(persisted_db["database_scope"], "non-system")
+
+    def test_stopped_dynamic_mysql_service_is_not_queried_during_dry_run(self):
+        cfg = _cfg("snipeit")
+        db = {
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": True, "databases": ["snipeit"],
+            "database_scope": "non-system",
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+        }
+        cj = {"services": {"db": {"environment": {
+            "MYSQL_ROOT_PASSWORD": "secret",
+        }}}}
+
+        with mock.patch.object(run_cmd.compose, "service_running", return_value=False), \
+                mock.patch.object(run_cmd.compose, "up_service") as start, \
+                mock.patch.object(run_cmd.compose, "stop_service") as stop, \
+                mock.patch.object(run_cmd.dbdump, "wait_ready", return_value=True), \
+                mock.patch.object(
+                    run_cmd.dbdump, "_mysql_non_system_databases",
+                ) as enumerate_dbs:
+            run_cmd._dump_one(cfg, db, cj, "/unused")
+
+        start.assert_called_once()
+        stop.assert_called_once()
+        enumerate_dbs.assert_not_called()
 
     def test_created_snapshot_is_verified_after_prune_before_manifest(self):
         events = []

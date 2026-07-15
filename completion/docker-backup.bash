@@ -80,7 +80,7 @@ _docker_backup() {
         run)    COMPREPLY=( $(compgen -W "--all" -- "$cur") ) ;;
         rm|remove) COMPREPLY=( $(compgen -W "--purge-keys --yes" -- "$cur") ) ;;
         logs)   COMPREPLY=( $(compgen -W "-f --follow -n --lines --notify" -- "$cur") ) ;;
-        set)    COMPREPLY=( $(compgen -W "--schedule --retention --offsite --offsite-retention --offsite-prune --no-offsite-prune --target --i-know-this-orphans-the-old-repo --exclude --exclude-clear --keep-within --no-keep-within --pre-cmd --post-cmd --restore-cmd --clear-hooks --allow-hooks --no-allow-hooks --quiesce --no-quiesce --dump-user --dump-globals --no-dump-globals" -- "$cur") ) ;;
+        set)    COMPREPLY=( $(compgen -W "--schedule --retention --offsite --offsite-retention --offsite-prune --no-offsite-prune --target --i-know-this-orphans-the-old-repo --exclude --exclude-clear --keep-within --no-keep-within --pre-cmd --post-cmd --restore-cmd --clear-hooks --allow-hooks --no-allow-hooks --quiesce --no-quiesce --dump-user --dump-globals --no-dump-globals --refresh-db-detection" -- "$cur") ) ;;
         update) COMPREPLY=( $(compgen -W "--check --branch -y --yes" -- "$cur") ) ;;
     esac
 }

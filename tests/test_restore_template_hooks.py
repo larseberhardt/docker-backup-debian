@@ -188,6 +188,44 @@ class TemplateHookResolutionTest(unittest.TestCase):
         confirm.assert_not_called()
 
 
+class RestoredMysqlScopeTest(unittest.TestCase):
+    def test_future_seed_comes_from_restored_compose_not_snapshot_import_list(self):
+        db_services = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": False,
+            "databases": ["snipeit", "later_deleted_audit"],
+        }]
+        compose_model = {"services": {"db": {
+            "image": "mariadb:10.7",
+            "environment": {
+                "MYSQL_ROOT_PASSWORD": "secret",
+                "MYSQL_DATABASE": "snipeit",
+            },
+        }}}
+
+        restore_cmd._enable_target_mysql_scope(db_services, compose_model)
+
+        self.assertEqual(db_services[0]["databases"], ["snipeit"])
+        self.assertTrue(db_services[0]["all_databases"])
+        self.assertEqual(db_services[0]["database_scope"], "non-system")
+
+    def test_seedless_restored_compose_keeps_dynamic_scope_without_required_seed(self):
+        db_services = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": False, "databases": ["snapshot_database"],
+        }]
+        compose_model = {"services": {"db": {
+            "image": "mariadb:10.7",
+            "environment": {"MARIADB_ROOT_PASSWORD": "secret"},
+        }}}
+
+        restore_cmd._enable_target_mysql_scope(db_services, compose_model)
+
+        self.assertEqual(db_services[0]["databases"], [])
+        self.assertTrue(db_services[0]["all_databases"])
+        self.assertEqual(db_services[0]["database_scope"], "non-system")
+
+
 class TemplateRestoreSaveFlowTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -327,6 +365,7 @@ class TemplateRestoreSaveFlowTest(unittest.TestCase):
         self.assertEqual(saved["stack_path"], dest)
         self.assertEqual(saved["compose_file"], os.path.join(dest, "docker-compose.yml"))
         self.assertEqual(saved["staging_dir"], os.path.join(dest, ".docker-backup"))
+        self.assertEqual(saved["db_scope_version"], config.DB_SCOPE_VERSION)
         self.assertEqual(saved["mount_check"], "/mnt/backups/gitlab")
         self.assertEqual(saved["key_file"], os.path.join(self.tmp, "keys", "gitlab.key"))
         self.assertEqual(saved["env_files"], [os.path.join(dest, ".env")])

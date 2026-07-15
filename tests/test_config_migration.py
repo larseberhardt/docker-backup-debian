@@ -43,6 +43,9 @@ class ConfigMigrationTest(unittest.TestCase):
         self.assertEqual(cfg["exclude_patterns"], [])
         self.assertIsNone(cfg["retention"]["keep_within"])
         self.assertIsNone(cfg["template"])
+        # Reading must never silently bless a legacy DB plan; run.py requires
+        # the operator-reviewed refresh before adding this marker.
+        self.assertNotIn("db_scope_version", cfg)
 
     def test_load_does_not_persist_on_read(self):
         path = self._write_v1()

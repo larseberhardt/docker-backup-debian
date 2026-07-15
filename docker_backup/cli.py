@@ -201,6 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Never prune the offsite repo (keeps everything, grows unbounded).")
     stp.add_argument("--dump-user", dest="dump_user", default=None,
                      help="Set the DB dump role for all DB services (e.g. supabase_admin).")
+    stp.add_argument(
+        "--refresh-db-detection", dest="refresh_db_detection", action="store_true",
+        help="Re-detect DB services and their dump scope from the current Compose model."
+    )
     sg = stp.add_mutually_exclusive_group()
     sg.add_argument("--dump-globals", dest="dump_globals", action="store_true", default=None,
                     help="Include cluster globals (roles/passwords) for Postgres in the backup.")

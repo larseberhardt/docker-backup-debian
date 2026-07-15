@@ -73,6 +73,12 @@ def derive(
     # contains identity + a compatibility hash, never executable text.
     # A regression test guards this.
     snapshot_id = validate_snapshot_id(snapshot_id)
+    for db in cfg.get("db_services") or []:
+        if isinstance(db, dict) and "database_scope" in db:
+            raise ValueError(
+                "database_scope must be resolved to an exact database list "
+                "before writing the manifest"
+            )
     external_bind_descriptors = _copy_external_bind_descriptors(
         cfg, external_bind_descriptors
     )

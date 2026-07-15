@@ -14,7 +14,7 @@ from docker_backup.commands import setcfg
 
 def _args(name="xibo", **kw):
     base = dict(name=name, schedule=None, retention=None, offsite=None,
-                target=None, ack_dangerous=False)
+                target=None, ack_dangerous=False, refresh_db_detection=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -146,7 +146,166 @@ class SetCommandTest(unittest.TestCase):
         setcfg.cmd_set(_args(offsite_prune=True))
         self.assertTrue(config.load("xibo")["offsite_prune"])
 
+    def test_refresh_db_detection_replaces_only_db_and_volume_plan(self):
+        cfg = config.load("xibo")
+        cfg.update({
+            "stack_path": "/opt/snipeit",
+            "compose_file": "/opt/snipeit/docker-compose.yml",
+            "project_name": "snipeit",
+            "db_autodetect": True,
+            "db_services": [{
+                "service": "snipeit-mysql", "engine": "mysql",
+                "auth_user": "root", "all_databases": True, "databases": [],
+                "password_source": "env:MYSQL_ROOT_PASSWORD",
+            }],
+            "exclude_paths": ["/opt/snipeit/db-old"],
+            "named_volumes": [{"key": "keep-old"}],
+            "hooks": {"pre_backup": [], "post_backup": [], "restore": [{"cmd": "restore"}]},
+            "hooks_allowed": True,
+            "hooks_fingerprint": "approved",
+            "key_file": "/etc/docker-backup/keys/xibo.key",
+            "offsite": "s3:bucket/xibo",
+            "exclude_patterns": ["cache/**"],
+            "extra_backup_paths": ["/srv/xibo-data"],
+            "template": {"name": "snipeit", "version": "1", "source": "builtin"},
+        })
+        config.save(cfg)
+        unchanged = {
+            key: cfg[key] for key in (
+                "repo", "key_file", "schedule", "retention", "offsite", "hooks",
+                "hooks_allowed", "hooks_fingerprint", "exclude_patterns",
+                "extra_backup_paths", "template",
+            )
+        }
+        compose_json = {"services": {"snipeit-mysql": {"image": "mariadb:10.7"}}}
+        detected = [{
+            "service": "snipeit-mysql", "engine": "mysql", "auth_user": "root",
+            "all_databases": True, "databases": ["snipeit"],
+            "database_scope": "non-system",
+            "password_source": "env:MYSQL_ROOT_PASSWORD", "raw_data_exclude": None,
+        }]
+        with mock.patch.object(setcfg.compose, "config_json", return_value=compose_json) as config_json, \
+                mock.patch.object(setcfg.create_cmd, "_build_db_services", return_value=detected), \
+                mock.patch.object(
+                    setcfg.compose, "collect_volume_backup_plan",
+                    return_value=(["/opt/snipeit/db"], [{"key": "uploads"}]),
+                ):
+            rc = setcfg.cmd_set(_args(refresh_db_detection=True))
+
+        self.assertEqual(rc, 0)
+        config_json.assert_called_once_with(
+            "/opt/snipeit/docker-compose.yml", "/opt/snipeit", "snipeit"
+        )
+        refreshed = config.load("xibo")
+        self.assertTrue(refreshed["db_services"][0]["all_databases"])
+        self.assertEqual(refreshed["db_services"][0]["databases"], ["snipeit"])
+        self.assertEqual(refreshed["db_services"][0]["database_scope"], "non-system")
+        self.assertEqual(refreshed["exclude_paths"], ["/opt/snipeit/db"])
+        self.assertEqual(refreshed["named_volumes"], [{"key": "uploads"}])
+        self.assertEqual(refreshed["db_scope_version"], config.DB_SCOPE_VERSION)
+        for key, value in unchanged.items():
+            self.assertEqual(refreshed[key], value, key)
+
+    def test_refresh_db_detection_does_not_erase_config_when_nothing_detected(self):
+        cfg = config.load("xibo")
+        cfg.update({
+            "stack_path": "/opt/app",
+            "compose_file": "/opt/app/docker-compose.yml",
+            "db_services": [{"service": "db", "engine": "mysql"}],
+        })
+        config.save(cfg)
+        with mock.patch.object(setcfg.compose, "config_json", return_value={}), \
+                mock.patch.object(setcfg.create_cmd, "_build_db_services", return_value=[]):
+            with self.assertRaises(util.CommandError):
+                setcfg.cmd_set(_args(refresh_db_detection=True))
+        self.assertEqual(config.load("xibo")["db_services"],
+                         [{"service": "db", "engine": "mysql"}])
+
+    def test_refresh_db_detection_dry_run_does_not_persist(self):
+        cfg = config.load("xibo")
+        cfg.update({
+            "stack_path": "/opt/snipeit",
+            "compose_file": "/opt/snipeit/docker-compose.yml",
+            "db_services": [{
+                "service": "db", "engine": "mysql", "auth_user": "root",
+                "all_databases": True, "databases": [],
+            }],
+        })
+        config.save(cfg)
+        before = config.load("xibo")
+        detected = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": True, "databases": ["snipeit"],
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+        }]
+        util.set_dry_run(True)
+        with mock.patch.object(setcfg.compose, "config_json", return_value={}), \
+                mock.patch.object(setcfg.create_cmd, "_build_db_services", return_value=detected), \
+                mock.patch.object(setcfg.compose, "collect_volume_backup_plan",
+                                  return_value=([], [])):
+            self.assertEqual(setcfg.cmd_set(_args(refresh_db_detection=True)), 0)
+        self.assertEqual(config.load("xibo"), before)
+
+    def test_refresh_keeps_stored_password_user_together(self):
+        cfg = config.load("xibo")
+        cfg.update({
+            "stack_path": "/opt/app",
+            "compose_file": "/opt/app/docker-compose.yml",
+            "db_services": [{
+                "service": "db", "engine": "mysql", "auth_user": "legacy-user",
+                "password_source": "stored", "all_databases": False,
+                "databases": ["app"],
+            }],
+        })
+        config.save(cfg)
+        detected = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "password_source": "none", "all_databases": False,
+            "databases": ["app"],
+        }]
+        with mock.patch.object(setcfg.compose, "config_json", return_value={}), \
+                mock.patch.object(setcfg.create_cmd, "_build_db_services", return_value=detected), \
+                mock.patch.object(setcfg.compose, "collect_volume_backup_plan",
+                                  return_value=([], [])):
+            self.assertEqual(setcfg.cmd_set(_args(refresh_db_detection=True)), 0)
+        db = config.load("xibo")["db_services"][0]
+        self.assertEqual(db["password_source"], "stored")
+        self.assertEqual(db["auth_user"], "legacy-user")
+
+    def test_refresh_preserves_dump_user_and_postgres_globals_overrides(self):
+        refreshed = [{
+            "service": "mysql-db", "engine": "mysql", "auth_user": "root",
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+            "all_databases": True, "databases": ["app"],
+            "database_scope": "non-system",
+        }, {
+            "service": "pg-db", "engine": "postgres", "auth_user": "postgres",
+            "password_source": "env:POSTGRES_PASSWORD",
+            "all_databases": False, "databases": ["app"],
+            "dump_globals": False,
+        }]
+        old_by_service = {
+            "mysql-db": {
+                "service": "mysql-db", "engine": "mysql",
+                "auth_user": "backup_admin",
+                "password_source": "env:MYSQL_ROOT_PASSWORD",
+            },
+            "pg-db": {
+                "service": "pg-db", "engine": "postgres",
+                "auth_user": "supabase_admin",
+                "password_source": "env:POSTGRES_PASSWORD",
+                "dump_globals": True,
+            },
+        }
+
+        setcfg._preserve_db_operator_overrides(refreshed, old_by_service)
+
+        self.assertEqual(refreshed[0]["auth_user"], "backup_admin")
+        self.assertEqual(refreshed[0]["password_source"],
+                         "env:MYSQL_ROOT_PASSWORD")
+        self.assertEqual(refreshed[1]["auth_user"], "supabase_admin")
+        self.assertTrue(refreshed[1]["dump_globals"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

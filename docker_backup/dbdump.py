@@ -72,8 +72,112 @@ def _mysql_dump_cmd(tool, auth_user, all_databases, databases, with_events):
     if all_databases:
         cmd += ["--all-databases"]
     else:
+        if not databases:
+            raise util.CommandError(
+                [tool, "--databases"], 2,
+                "A scoped MySQL dump requires at least one database.",
+            )
         cmd += ["--databases"] + (databases or [])
     return cmd
+
+
+_MYSQL_SYSTEM_DATABASES = frozenset({
+    "information_schema", "mysql", "ndbinfo", "performance_schema", "sys",
+})
+
+
+def _parse_mysql_database_names(stdout: str) -> List[str]:
+    """Decode hex-encoded schema names and drop image-owned schemas.
+
+    The resulting names are persisted into the exact snapshot manifest, whose
+    strict format deliberately rejects path/control characters.  Fail here
+    before creating a dump if a server exposes a name that cannot be represented
+    safely and portably by the restore metadata.
+    """
+    names = []  # type: List[str]
+    seen = set()
+    for raw in (stdout or "").splitlines():
+        encoded = raw.rstrip("\r")
+        try:
+            if (not encoded or encoded != encoded.strip() or len(encoded) % 2
+                    or any(c not in "0123456789abcdefABCDEF" for c in encoded)):
+                raise ValueError("invalid hex")
+            name = bytes.fromhex(encoded).decode("utf-8", "strict")
+        except (ValueError, UnicodeDecodeError):
+            raise util.CommandError(
+                ["mysql", "list-databases"], 1,
+                "MySQL returned a malformed hex-encoded database name.",
+            )
+        if name in _MYSQL_SYSTEM_DATABASES:
+            continue
+        if (not name or name != name.strip() or len(name) > 256
+                or name.startswith("-") or "\0" in name
+                or "/" in name or "\\" in name
+                or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+            raise util.CommandError(
+                ["mysql", "SHOW DATABASES"], 1,
+                "MySQL returned an unsafe or unsupported database name: %r" % name,
+            )
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    if not names:
+        raise util.CommandError(
+            ["mysql", "SHOW DATABASES"], 1,
+            "No non-system MySQL/MariaDB database is visible to the dump user.",
+        )
+    if len(names) > 64:
+        raise util.CommandError(
+            ["mysql", "SHOW DATABASES"], 1,
+            "More than 64 non-system databases were found; refusing an "
+            "unrepresentable restore manifest.",
+        )
+    # Stable dump/manifest ordering improves restic deduplication and keeps
+    # snapshot metadata reproducible even if the schema catalog order changes.
+    names.sort()
+    return names
+
+
+def _mysql_non_system_databases(
+    db, password, compose_file, project_dir, project_name,
+) -> List[str]:
+    """Enumerate every database visible to the configured user except the five
+    MySQL/MariaDB system schemas.
+
+    The schema catalog is queried immediately before mysqldump, after the service
+    readiness check. This captures user databases created after the original
+    docker-backup configuration instead of trusting only the image-init
+    ``MYSQL_DATABASE`` value. Names are transferred as hex to avoid delimiter or
+    client-escaping ambiguity.
+    """
+    tool = _probe_tool(
+        compose_file, project_dir, db["service"], ["mariadb", "mysql"], project_name,
+    ) or "mysql"
+    env = {}  # type: Dict[str, str]
+    if password:
+        env["MYSQL_PWD"] = password
+        util.register_secret(password)
+    cmd = [
+        tool, "--batch", "--skip-column-names",
+        "-h", "127.0.0.1", "-u", db["auth_user"],
+        "-e", ("SELECT HEX(SCHEMA_NAME) FROM information_schema.SCHEMATA "
+               "ORDER BY SCHEMA_NAME"),
+    ]
+    argv = compose.exec_args(
+        compose_file, project_dir, db["service"], cmd,
+        env=env, tty=False, project_name=project_name,
+    )
+    proc = util.run(argv, capture=True, check=True)
+    names = _parse_mysql_database_names(proc.stdout or "")
+    seeds = db.get("databases") or []
+    missing = [name for name in seeds if name not in names]
+    if missing:
+        raise util.CommandError(
+            [tool, "SHOW DATABASES"], 1,
+            "Configured application database(s) not visible to dump user '%s': %s"
+            % (db["auth_user"], ", ".join(missing)),
+        )
+    return names
 
 
 # mariadb-dump/mysqldump abort on ``SHOW EVENTS`` with error 1577 when the server's event
@@ -91,6 +195,26 @@ def _is_event_scheduler_error(stderr) -> bool:
 def _dump_mysql(
     db, password, compose_file, project_dir, project_name, out_path, *, dumps_fd=None,
 ) -> None:
+    scope = db.get("database_scope")
+    if scope not in (None, "non-system"):
+        raise util.CommandError(
+            ["mysql", "database-scope"], 2,
+            "Unsupported dynamic MySQL database scope: %r" % scope,
+        )
+    if scope == "non-system":
+        databases = _mysql_non_system_databases(
+            db, password, compose_file, project_dir, project_name,
+        )
+        db["all_databases"] = False
+        db["databases"] = databases
+        # The manifest must contain the exact authenticated import plan, not a
+        # dynamic source-side instruction.  Config is loaded afresh next run, so
+        # removing this in-memory marker does not disable future enumeration.
+        db.pop("database_scope", None)
+        util.info(
+            "MySQL dump scope for '%s': all non-system databases (%s)."
+            % (db["service"], ", ".join(databases))
+        )
     tool = _probe_tool(
         compose_file, project_dir, db["service"],
         ["mariadb-dump", "mysqldump"], project_name,

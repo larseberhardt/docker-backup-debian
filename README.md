@@ -11,6 +11,11 @@ is done via a **systemd timer** per stack.
   and variables).
 - **DB detection** from the image (`mysql`/`mariadb`/`postgres`); credentials from the
   resolved environment. With `MYSQL_RANDOM_ROOT_PASSWORD=yes`, falls back to the app user.
+  A real root password is still used for reliable access. Immediately before every
+  MySQL/MariaDB dump, all visible non-system databases are enumerated; a declared
+  `MYSQL_DATABASE`/`MARIADB_DATABASE` must be among them. This includes additional user
+  databases created later, but excludes the image-owned `mysql`, `sys`, `ndbinfo`,
+  `performance_schema` and `information_schema` databases.
 - **Consistent DB dump:** `mysqldump --single-transaction` / `mariadb-dump` or `pg_dump`.
   The raw DB data directories are **excluded** from the file backup.
 - **Supabase-aware Postgres:** a `supabase/postgres` image is detected automatically and
@@ -149,6 +154,7 @@ sudo docker-backup logs xibo -f        # follow live
 sudo docker-backup key show xibo       # restic key + escrow notice (SECRET!)
 sudo docker-backup set xibo --schedule 'weekly Mon 04:00'   # change the schedule
 sudo docker-backup set xibo --retention 14/8/12             # change retention
+sudo docker-backup set xibo --refresh-db-detection           # refresh DBs/scope from Compose
 sudo docker-backup rm xibo             # remove the setup (repo + key are kept!)
 ```
 
@@ -156,6 +162,49 @@ sudo docker-backup rm xibo             # remove the setup (repo + key are kept!)
   runs the full wizard (target/offsite/frequency per stack).
 - **`create --all --auto --target <base>`** sets up **all** running stacks without
   prompting, under one shared target base (for quick whole-server setup).
+
+#### Refreshing legacy MySQL/MariaDB scope
+
+Configs created by versions up to 1.0.3 may contain `all_databases=true` when a root
+password was available, even though Compose declares one application database. Such a
+dump includes MariaDB's `mysql` system database and can fail when imported into a fresh
+container. Legacy app-user configs can have the opposite problem: their static list does
+not include additional databases created later. After upgrading, every auto-detected
+legacy MySQL/MariaDB plan must therefore be reviewed and refreshed explicitly:
+
+```bash
+sudo docker-backup --dry-run set snipeit --refresh-db-detection
+sudo docker-backup set snipeit --refresh-db-detection
+sudo docker-backup run snipeit
+```
+
+The refresh changes only the detected DB/volume plan; repo, key, schedule, retention,
+offsite settings, hooks, template and user exclude patterns are preserved. Existing
+dump-user and Postgres-globals overrides are preserved too and are shown in the
+dry-run diff. A legacy ambiguous config fails before hooks or dump staging and points
+to this command instead of being changed silently. At each subsequent backup the
+configured application database must be visible and all other visible non-system
+databases are included too. The corrected scope applies only to **new** snapshots:
+existing all-database snapshots are not rewritten, so create a fresh snapshot and test
+that exact snapshot during the restore drill.
+
+This portable scope deliberately does **not** copy accounts/grants from the `mysql` system
+database; the fresh container recreates the users declared by Compose. If the DB container
+has additional manually managed users or grants, record and recreate those separately and
+verify them in the drill. With a non-root dump user, enumeration is privilege-dependent; if
+a visible user database cannot be dumped, the whole backup fails instead of silently omitting
+it.
+
+The stored dynamic MySQL scope is deliberately backward-safe. Current versions resolve
+it to the exact non-system database list before each dump and record that list in the
+snapshot manifest. Therefore a refreshed JSON config can intentionally contain both
+`database_scope="non-system"` and `all_databases=true`; the marker controls current
+versions and the boolean is only the safe legacy fallback. If the program is rolled back
+to v1.0.3, that older version ignores
+the new scope marker and falls back to `--all-databases`: this may reintroduce the old
+system-database restore conflict, but it does not silently omit additional user
+databases. Refresh and create a new snapshot again after returning to the current
+version.
 
 ### Specifying the backup target
 

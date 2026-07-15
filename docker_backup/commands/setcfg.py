@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Dict
 
 from .. import compose, config, hooks, restic, systemd_units, util
+from . import create as create_cmd
 
 
 def _parse_retention(spec: str) -> Dict[str, int]:
@@ -26,12 +27,70 @@ def _parse_retention(spec: str) -> Dict[str, int]:
     return {"daily": vals[0], "weekly": vals[1], "monthly": vals[2]}
 
 
+def _preserve_db_operator_overrides(refreshed: list, old_by_service: dict) -> None:
+    """Keep DB settings that may have been set explicitly via ``set``.
+
+    Legacy configs do not record override provenance.  Preserving a differing
+    dump role/password pair can make a stale credential fail loudly, while
+    silently replacing it can reduce privileges and omit data.  Likewise,
+    changing ``dump_globals`` can make a previously portable Postgres backup
+    incomplete. Explicit flags supplied in the same command are applied after
+    this function and therefore still win.
+    """
+    for db in refreshed:
+        old = old_by_service.get(db.get("service")) or {}
+        if old.get("engine") != db.get("engine"):
+            continue
+
+        old_user = old.get("auth_user")
+        if old_user and old_user != db.get("auth_user"):
+            db["auth_user"] = old_user
+            if isinstance(old.get("password_source"), str):
+                db["password_source"] = old["password_source"]
+        elif (db.get("password_source") == "none"
+              and old.get("password_source") == "stored"):
+            # An older interactive setup may have a password sidecar while the
+            # current Compose model still exposes no password environment key.
+            db["password_source"] = "stored"
+            db["auth_user"] = old_user or db.get("auth_user")
+
+        if (db.get("engine") == "postgres"
+                and isinstance(old.get("dump_globals"), bool)):
+            db["dump_globals"] = old["dump_globals"]
+
+
+def _describe_db_plan(db: dict) -> str:
+    if db.get("database_scope") == "non-system":
+        scope = "all non-system databases (seed: %s)" % (
+            ",".join(db.get("databases") or []) or "<none>"
+        )
+    else:
+        scope = "all databases" if db.get("all_databases") else ",".join(
+            db.get("databases") or []
+        )
+    details = "%s=%s; user=%s" % (
+        db.get("service"), scope or "<none>", db.get("auth_user") or "<default>",
+    )
+    if db.get("engine") == "postgres":
+        details += "; globals=%s" % ("yes" if db.get("dump_globals") else "no")
+    return details
+
+
 def cmd_set(args) -> int:
     util.require_root()
     name = config.sanitize_name(args.name)
     if not config.exists(name):
         util.error("No config named '%s'." % name)
         return 1
+    with util.FileLock(config.mutation_lock_path(name)):
+        # Recheck after acquiring the same per-name lock used by create/restore.
+        if not config.exists(name):
+            util.error("Config '%s' disappeared while waiting for the lock." % name)
+            return 1
+        return _cmd_set_locked(args, name)
+
+
+def _cmd_set_locked(args, name: str) -> int:
     cfg = config.load(name)
     changed = False
     reschedule = False
@@ -144,6 +203,43 @@ def cmd_set(args) -> int:
 
     if args.offsite is not None:
         cfg["offsite"] = compose.repo_for(args.offsite, name) if args.offsite else None
+        changed = True
+
+    if getattr(args, "refresh_db_detection", False):
+        stack_path = cfg.get("stack_path")
+        compose_file = cfg.get("compose_file")
+        if not stack_path or not compose_file:
+            raise util.CommandError(
+                ["set", name, "--refresh-db-detection"], 2,
+                "The stored config has no stack_path/compose_file; repair or review "
+                "those fields before refreshing. No configuration was changed.",
+            )
+        cj = compose.config_json(compose_file, stack_path, cfg.get("project_name"))
+        refreshed = create_cmd._build_db_services(cj, name, interactive=False)
+        if not refreshed:
+            raise util.CommandError(
+                ["set", name, "--refresh-db-detection"], 1,
+                "No supported database was detected; the existing DB configuration "
+                "was left unchanged.",
+            )
+
+        old_by_service = {
+            db.get("service"): db for db in (cfg.get("db_services") or [])
+            if isinstance(db, dict) and db.get("service")
+        }
+        _preserve_db_operator_overrides(refreshed, old_by_service)
+
+        exclude_paths, named_volumes = compose.collect_volume_backup_plan(cj, refreshed)
+        cfg["db_services"] = refreshed
+        cfg["exclude_paths"] = exclude_paths
+        cfg["named_volumes"] = named_volumes
+        cfg["db_autodetect"] = True
+        cfg["db_scope_version"] = config.DB_SCOPE_VERSION
+        old_scopes = [_describe_db_plan(db) for db in old_by_service.values()]
+        scopes = [_describe_db_plan(db) for db in refreshed]
+        util.info("DB detection refreshed: %s -> %s." % (
+            "; ".join(old_scopes) or "<none>", "; ".join(scopes),
+        ))
         changed = True
 
     if getattr(args, "dump_user", None) is not None:

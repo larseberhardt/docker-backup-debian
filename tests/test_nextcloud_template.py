@@ -29,12 +29,14 @@ class NextcloudTemplateTest(unittest.TestCase):
             "app": {"image": "nextcloud:33.0.5"}}}
         self.assertEqual(templates.detect_template(cj), "nextcloud")
 
-    def test_root_password_dumps_all_databases(self):
+    def test_root_password_selects_non_system_scope_seeded_by_configured_database(self):
         env = {"MYSQL_ROOT_PASSWORD": "x", "MYSQL_DATABASE": "nextcloud",
                "MYSQL_USER": "nextcloud", "MYSQL_PASSWORD": "y"}
         creds = detect.extract_credentials(env, "mysql")
         self.assertEqual(creds["user"], "root")
         self.assertTrue(creds["all_databases"])
+        self.assertEqual(creds["databases"], ["nextcloud"])
+        self.assertEqual(creds["database_scope"], "non-system")
 
 
 class NextcloudExcludeInvariantTest(unittest.TestCase):

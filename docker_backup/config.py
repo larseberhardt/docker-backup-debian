@@ -14,6 +14,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 SCHEMA_VERSION = 2
+DB_SCOPE_VERSION = 2
 DEFAULT_RETENTION = {"daily": 7, "weekly": 4, "monthly": 6}
 DEFAULT_SCHEDULE_INPUT = "daily 03:00"
 

@@ -22,17 +22,73 @@ class DetectTest(unittest.TestCase):
         creds = detect.extract_credentials(dbs[0]["environment"], "mysql")
         self.assertEqual(creds["source"], "app")
         self.assertEqual(creds["user"], "cms")
-        self.assertFalse(creds["all_databases"])
+        self.assertTrue(creds["all_databases"])
         self.assertEqual(creds["databases"], ["cms"])
         self.assertEqual(creds["password_env_key"], "MYSQL_PASSWORD")
 
-    def test_root_used_when_real_root_password(self):
+    def test_root_without_seed_still_uses_non_system_scope(self):
         env = {"MYSQL_ROOT_PASSWORD": "rootpw", "MYSQL_USER": "app", "MYSQL_PASSWORD": "x"}
         creds = detect.extract_credentials(env, "mysql")
         self.assertEqual(creds["source"], "root")
         self.assertEqual(creds["user"], "root")
         self.assertTrue(creds["all_databases"])
+        self.assertEqual(creds["databases"], [])
+        self.assertEqual(creds["database_scope"], "non-system")
         self.assertEqual(creds["password_env_key"], "MYSQL_ROOT_PASSWORD")
+
+    def test_root_with_explicit_database_selects_dynamic_non_system_scope(self):
+        env = {"MYSQL_ROOT_PASSWORD": "rootpw", "MYSQL_DATABASE": "snipeit",
+               "MYSQL_USER": "snipeit", "MYSQL_PASSWORD": "app-pw"}
+        creds = detect.extract_credentials(env, "mysql")
+        self.assertEqual(creds["source"], "root")
+        self.assertEqual(creds["user"], "root")
+        self.assertTrue(creds["all_databases"])
+        self.assertEqual(creds["databases"], ["snipeit"])
+        self.assertEqual(creds["database_scope"], "non-system")
+        self.assertEqual(creds["password_env_key"], "MYSQL_ROOT_PASSWORD")
+
+    def test_mariadb_root_with_explicit_database_is_scoped(self):
+        env = {"MARIADB_ROOT_PASSWORD": "rootpw", "MARIADB_DATABASE": "nextcloud"}
+        creds = detect.extract_credentials(env, "mysql")
+        self.assertTrue(creds["all_databases"])
+        self.assertEqual(creds["databases"], ["nextcloud"])
+        self.assertEqual(creds["database_scope"], "non-system")
+        self.assertEqual(creds["password_env_key"], "MARIADB_ROOT_PASSWORD")
+
+    def test_mariadb_image_prefers_mariadb_aliases_when_both_are_set(self):
+        env = {
+            "MYSQL_ROOT_PASSWORD": "mysql-root", "MARIADB_ROOT_PASSWORD": "maria-root",
+            "MYSQL_DATABASE": "wrong", "MARIADB_DATABASE": "right",
+        }
+        creds = detect.extract_credentials(env, "mysql", "mariadb")
+        self.assertEqual(creds["password"], "maria-root")
+        self.assertEqual(creds["password_env_key"], "MARIADB_ROOT_PASSWORD")
+        self.assertEqual(creds["databases"], ["right"])
+
+    def test_mysql_image_prefers_mysql_aliases_when_both_are_set(self):
+        env = {
+            "MYSQL_ROOT_PASSWORD": "mysql-root", "MARIADB_ROOT_PASSWORD": "maria-root",
+            "MYSQL_DATABASE": "right", "MARIADB_DATABASE": "wrong",
+        }
+        creds = detect.extract_credentials(env, "mysql", "mysql")
+        self.assertEqual(creds["password"], "mysql-root")
+        self.assertEqual(creds["databases"], ["right"])
+
+    def test_conflicting_aliases_without_image_context_fail_closed(self):
+        env = {"MYSQL_DATABASE": "one", "MARIADB_DATABASE": "two"}
+        with self.assertRaises(ValueError):
+            detect.extract_credentials(env, "mysql")
+
+    def test_mysql_image_flavor_is_detected(self):
+        cj = {"services": {
+            "maria": {"image": "mariadb:10.11"},
+            "mysql": {"image": "mysql:8.4"},
+            "percona": {"image": "percona:8.0"},
+        }}
+        flavors = {item["service"]: item["flavor"] for item in detect.find_db_services(cj)}
+        self.assertEqual(flavors, {
+            "maria": "mariadb", "mysql": "mysql", "percona": "mysql",
+        })
 
     def test_mariadb_env_aliases(self):
         env = {"MARIADB_RANDOM_ROOT_PASSWORD": "yes", "MARIADB_USER": "u",

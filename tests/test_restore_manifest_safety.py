@@ -107,6 +107,21 @@ class ManifestSnapshotSafetyTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         restore.assert_not_called()
 
+    def test_v103_manifest_accepts_rollback_safe_dynamic_scope_marker(self):
+        data = _v5_manifest()
+        data["manifest_schema_version"] = 3
+        data["db_services"] = [{
+            "service": "db", "engine": "mysql", "auth_user": "root",
+            "all_databases": True, "databases": ["app"],
+            "database_scope": "non-system",
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+        }]
+
+        # Published v1.0.3 writes schema-v3 manifests and copies unknown DB
+        # config fields. Current restore intentionally applies the strict field
+        # allowlist only to v5, so a rollback-created manifest stays readable.
+        restore_cmd._validate_bootstrap_manifest(data)
+
 
 class ManifestDockerAuthorizationTest(unittest.TestCase):
     def test_detected_database_still_requires_default_no_confirmation(self):

@@ -8,7 +8,7 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from docker_backup import util
+from docker_backup import config, util
 from docker_backup.commands import run as run_cmd
 
 
@@ -41,6 +41,7 @@ def _db(raw_data_exclude="/opt/app/mysql"):
 def _cfg():
     return {
         "name": "app",
+        "db_scope_version": config.DB_SCOPE_VERSION,
         "stack_path": "/opt/app",
         "compose_file": "/opt/app/docker-compose.yml",
         "project_name": "app",

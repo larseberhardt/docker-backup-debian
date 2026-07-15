@@ -109,8 +109,31 @@ _GENERIC_PG_CJ = {
     },
 }
 
+_SNIPEIT_CJ = {
+    "services": {
+        "snipeit-mysql": {
+            "image": "mariadb:10.7",
+            "environment": {
+                "MYSQL_ROOT_PASSWORD": "rootpw",
+                "MYSQL_DATABASE": "snipeit",
+                "MYSQL_USER": "snipeit",
+                "MYSQL_PASSWORD": "apppw",
+            },
+        },
+    },
+}
+
 
 class BuildDbServicesTest(unittest.TestCase):
+    def test_snipeit_root_dump_excludes_mariadb_system_databases(self):
+        out = create._build_db_services(_SNIPEIT_CJ, "snipeit", interactive=False)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["auth_user"], "root")
+        self.assertEqual(out[0]["password_source"], "env:MYSQL_ROOT_PASSWORD")
+        self.assertTrue(out[0]["all_databases"])
+        self.assertEqual(out[0]["databases"], ["snipeit"])
+        self.assertEqual(out[0]["database_scope"], "non-system")
+
     def test_supabase_defaults(self):
         out = create._build_db_services(_SUPABASE_CJ, "supa", interactive=False)
         self.assertEqual(len(out), 1)
@@ -177,6 +200,7 @@ class DbAutodetectSkipTest(unittest.TestCase):
         cfg = config.load("gitlab")
         self.assertEqual(cfg["db_services"], [])
         self.assertFalse(cfg["db_autodetect"])
+        self.assertEqual(cfg["db_scope_version"], config.DB_SCOPE_VERSION)
         self.assertEqual(cfg["exclude_patterns"], ["gitlab/logs"])
         self.assertEqual(cfg["retention"]["keep_within"], "30d")
 
