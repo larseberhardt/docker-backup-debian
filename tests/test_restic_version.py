@@ -37,6 +37,8 @@ class ResticVersionTest(unittest.TestCase):
             self.assertIsNone(restic.restic_version())
 
     def test_version_gates_are_ordered(self):
+        self.assertGreaterEqual(restic.MIN_VERSION, (0, 17, 0))
+        self.assertGreaterEqual(restic.RECOMMENDED_VERSION, (0, 19, 1))
         self.assertLess(restic.MIN_VERSION, restic.RECOMMENDED_VERSION)
 
 
@@ -66,6 +68,21 @@ class CheckReposSelectionTest(unittest.TestCase):
             m.repo_initialized.return_value = False
             problems = check_cmd._check_repos(cfg, "/k.key", None)
         self.assertEqual(problems, ["primary repo not reachable"])
+
+    def test_check_repos_records_probe_error_and_continues_with_offsite(self):
+        cfg = {"repo": "/repo", "offsite": "/off"}
+        probe_error = util.CommandError(["restic"], 12, "wrong password")
+        with mock.patch.object(check_cmd, "restic") as m:
+            m.repo_initialized.side_effect = [probe_error, True]
+            m.check.return_value = True
+            problems = check_cmd._check_repos(cfg, "/k.key", None)
+        self.assertEqual(
+            problems, ["primary repo not reachable (restic rc=12)"],
+        )
+        self.assertEqual(
+            [c.args[0] for c in m.unlock.call_args_list], ["/repo", "/off"],
+        )
+        m.check.assert_called_once_with("/off", "/k.key", read_data_subset=None)
 
 
 if __name__ == "__main__":

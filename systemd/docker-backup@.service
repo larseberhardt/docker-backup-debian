@@ -10,6 +10,12 @@ OnFailure=docker-backup-notify@%i.service
 Type=oneshot
 # Backend credentials (S3/B2/SFTP …) optional; '-' = file may be missing
 EnvironmentFile=-/etc/docker-backup/backends/%i.env
+# restic 0.19 treats an unavailable default cache as a repository-open error.
+# system services do not reliably receive HOME/XDG_CACHE_HOME, so give every
+# stack a shared, systemd-managed cache root (restic separates repositories by ID).
+CacheDirectory=docker-backup/restic
+CacheDirectoryMode=0700
+Environment=RESTIC_CACHE_DIR=/var/cache/docker-backup/restic
 ExecStart=/usr/local/bin/docker-backup run %i
 Nice=10
 IOSchedulingClass=best-effort

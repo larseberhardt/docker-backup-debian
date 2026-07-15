@@ -38,15 +38,16 @@ if ! command -v restic >/dev/null 2>&1; then
 fi
 log "restic: $(restic version 2>/dev/null | head -n1 || echo 'unknown')"
 
-# Offsite (init/copy --from-repo) needs restic >= 0.14; >= 0.16 also removes
-# stale repo locks on its own. Distro packages can be older (Ubuntu 22.04: 0.12).
+# Safe automatic repository detection needs restic >= 0.17 (dedicated missing-repo
+# exit code); that version also supports correct-size sparse restores. A current
+# restic is strongly recommended for restore, hard-link and metadata fixes.
 RESTIC_VER="$(restic version 2>/dev/null | awk '{print $2; exit}')"
 if [ -n "${RESTIC_VER:-}" ]; then
-  if [ "$(printf '%s\n' "$RESTIC_VER" 0.14.0 | sort -V | head -n1)" != "0.14.0" ]; then
-    warn "restic $RESTIC_VER is OLDER than 0.14 — offsite backups (3-2-1) will NOT work."
+  if [ "$(printf '%s\n' "$RESTIC_VER" 0.17.0 | sort -V | head -n1)" != "0.17.0" ]; then
+    warn "restic $RESTIC_VER is OLDER than 0.17 — repository detection is ambiguous and safe automatic initialization is unavailable."
     warn "Install a newer restic (backports or https://restic.net), then rerun install.sh."
-  elif [ "$(printf '%s\n' "$RESTIC_VER" 0.16.0 | sort -V | head -n1)" != "0.16.0" ]; then
-    warn "restic $RESTIC_VER works; >= 0.16 is recommended (auto-removes stale repo locks)."
+  elif [ "$(printf '%s\n' "$RESTIC_VER" 0.19.1 | sort -V | head -n1)" != "0.19.1" ]; then
+    warn "restic $RESTIC_VER works; >= 0.19.1 is recommended for current restore fixes."
   fi
 fi
 

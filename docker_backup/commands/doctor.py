@@ -49,12 +49,14 @@ def _warn_restic_version() -> None:
         return
     ver = ".".join(str(x) for x in v)
     if v < restic.MIN_VERSION:
-        util.warn("restic %s is too old: offsite backups (init/copy --from-repo) need "
-                  ">= %s. Please upgrade (https://restic.net)."
+        util.warn("restic %s is too old: safe repository detection and sparse "
+                  "restores need >= %s. Older exit codes cannot safely drive "
+                  "automatic repository initialization. Please upgrade "
+                  "(https://restic.net)."
                   % (ver, ".".join(str(x) for x in restic.MIN_VERSION)))
     elif v < restic.RECOMMENDED_VERSION:
-        util.warn("restic %s works; >= %s is recommended (removes stale repo locks "
-                  "automatically, --retry-lock)."
+        util.warn("restic %s works; >= %s is recommended for current restore, "
+                  "hard-link and metadata error-handling fixes."
                   % (ver, ".".join(str(x) for x in restic.RECOMMENDED_VERSION)))
 
 
@@ -88,8 +90,11 @@ def _check_one(name: str) -> Tuple[Tuple[Any, ...], int]:
         else:
             repo_col = "missing"
             severity = max(severity, 2)
+    except util.CommandError as exc:
+        repo_col = "error(rc=%s)" % exc.returncode
+        severity = max(severity, 2)
     except Exception:
-        repo_col = "missing"
+        repo_col = "error"
         severity = max(severity, 2)
 
     # --- TIMER ---

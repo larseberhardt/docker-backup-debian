@@ -33,6 +33,10 @@ class ResticBuilderTest(unittest.TestCase):
         self.assertIn("stack:xibo", argv)
         self.assertEqual(argv[-1], "/opt/xibo")
 
+    def test_restore_recreates_sparse_files(self):
+        argv = restic.build_restore("/repo", "/k.key", "latest", "/scratch")
+        self.assertIn("--sparse", argv)
+
     def test_forget_retention_flags(self):
         argv = restic.build_forget("/repo", "/k.key", {"daily": 7, "weekly": 4, "monthly": 6}, ["docker-backup"])
         self.assertIn("--prune", argv)

@@ -56,6 +56,17 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
         return 1
 
     runtime.load_backend_env(cfg)
+    if not util.DRY_RUN:
+        installed = restic.restic_version()
+        if installed is not None and installed < restic.MIN_VERSION:
+            have = ".".join(str(x) for x in installed)
+            need = ".".join(str(x) for x in restic.MIN_VERSION)
+            util.error(
+                "restic %s is too old for a safe restore (need >= %s for "
+                "unambiguous repository detection and restore --sparse). "
+                "Upgrade restic before retrying." % (have, need)
+            )
+            return 1
     if not util.DRY_RUN and not restic.repo_initialized(cfg["repo"], cfg["key_file"]):
         util.error("restic repo not reachable: %s" % cfg["repo"])
         return 1

@@ -8,6 +8,11 @@ After=docker.service network-online.target
 Type=oneshot
 # Backend credentials are loaded per stack from /etc/docker-backup/backends/<name>.env
 # (no EnvironmentFile here, since this singleton checks all stacks).
+# Keep repository opening compatible with restic >= 0.19 even though systemd
+# services do not reliably receive HOME/XDG_CACHE_HOME.
+CacheDirectory=docker-backup/restic
+CacheDirectoryMode=0700
+Environment=RESTIC_CACHE_DIR=/var/cache/docker-backup/restic
 ExecStart=/usr/local/bin/docker-backup check --all --refresh-cache
 Nice=15
 IOSchedulingClass=idle

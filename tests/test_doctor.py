@@ -56,6 +56,15 @@ class DoctorTest(unittest.TestCase):
         with mock.patch.object(doctor.restic, "repo_initialized", return_value=False):
             self.assertEqual(doctor.cmd_doctor(self._args()), 1)
 
+    def test_repo_probe_error_is_not_reported_as_missing(self):
+        status.write_status("xibo", result="success", started_at="a", finished_at="b",
+                            duration_sec=1.0)
+        error = util.CommandError(["restic"], 12, "wrong password")
+        with mock.patch.object(doctor.restic, "repo_initialized", side_effect=error):
+            row, severity = doctor._check_one("xibo")
+        self.assertEqual(row[2], "error(rc=12)")
+        self.assertEqual(severity, 2)
+
     def test_unknown_name_rc1(self):
         self.assertEqual(doctor.cmd_doctor(self._args(name="nope")), 1)
 

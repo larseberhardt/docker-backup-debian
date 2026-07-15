@@ -92,12 +92,19 @@ def _check_repos(cfg, key: str, subset: Optional[str]) -> List[str]:
     """Runs 'restic check' against primary (+ offsite); returns problem strings."""
     problems = []  # type: List[str]
     for label, repo in _repos_of(cfg):
-        restic.unlock(repo, key)  # clear stale locks so the check itself can lock
-        if not restic.repo_initialized(repo, key):
-            problems.append("%s repo not reachable" % label)
-            continue
-        if not restic.check(repo, key, read_data_subset=subset):
-            problems.append("%s: restic check reported errors" % label)
+        try:
+            restic.unlock(repo, key)  # clear stale locks so the check itself can lock
+            if not restic.repo_initialized(repo, key):
+                problems.append("%s repo not reachable" % label)
+                continue
+            if not restic.check(repo, key, read_data_subset=subset):
+                problems.append("%s: restic check reported errors" % label)
+        except util.CommandError as exc:
+            # Password/cache/backend failures are not proof that a repository is
+            # absent. Continue with the other repositories and report this one.
+            problems.append(
+                "%s repo not reachable (restic rc=%s)" % (label, exc.returncode)
+            )
     return problems
 
 

@@ -46,8 +46,9 @@ is done via a **systemd timer** per stack.
   before every backup/check run (`restic unlock`).
 
 > Python standard library only, no pip dependencies. Tested on Python 3.9 and up.
-> restic **>= 0.14** required for offsite (`init/copy --from-repo`); **>= 0.16**
-> recommended. `install.sh` and `doctor` warn on older distro packages.
+> restic **>= 0.17** required (unambiguous missing-repository exit codes and
+> `restore --sparse`); **>= 0.19.1** recommended. `install.sh` and `doctor` warn
+> on older distro packages.
 
 ---
 
@@ -66,6 +67,11 @@ The installer copies the program to `/opt/docker-backup`, creates the symlink
 systemd units, and the directories under `/etc/docker-backup`. When installed from a
 git checkout, it records the origin URL in `/etc/docker-backup/update.conf`,
 so **auto-update** works right away (see [Updating](#updating)).
+
+Automatic backup and integrity-check services use a systemd-managed restic cache at
+`/var/cache/docker-backup/restic`. This is needed by restic 0.19 and newer because
+system services do not reliably receive `HOME` or `XDG_CACHE_HOME`; `CacheDirectory=`
+creates the protected cache root automatically, including after a tool update.
 
 ---
 
@@ -499,7 +505,7 @@ If the tool is not available, restic + the matching key is enough:
 
 ```bash
 restic -r /mnt/backups/xibo --password-file /etc/docker-backup/keys/xibo.key snapshots
-restic -r /mnt/backups/xibo --password-file /etc/docker-backup/keys/xibo.key restore latest --target /restore
+restic -r /mnt/backups/xibo --password-file /etc/docker-backup/keys/xibo.key restore latest --target /restore --sparse
 # Stack is under /restore/opt/xibo, dumps under .docker-backup/dumps/,
 # volume tars under .docker-backup/volumes/. Then import the DB dump manually:
 #   docker compose up -d <db-service>
@@ -545,6 +551,7 @@ Recommendations:
 └── repo/                      git checkout for updates (created by update.sh)
 /usr/local/bin/docker-backup   symlink to the launcher
 /etc/bash_completion.d/docker-backup   bash completion (if the directory exists)
+/var/cache/docker-backup/restic        systemd-managed restic repository cache
 /etc/docker-backup/
 ├── configs/<name>.json        stack config (0640)
 ├── keys/<name>.key            restic repo key (0600)

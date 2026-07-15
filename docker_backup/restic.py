@@ -12,13 +12,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import util
 
-# Feature floor: 'init --from-repo' / 'copy --from-password-file' (offsite) need
-# restic >= 0.14; >= 0.16 additionally removes stale locks on its own and knows
-# --retry-lock. Distro packages (Debian 11 / Ubuntu 22.04: 0.12.x) are below that.
-MIN_VERSION = (0, 14, 0)
-RECOMMENDED_VERSION = (0, 16, 0)
+# Feature floor: >= 0.17 provides an unambiguous exit code when a repository is
+# absent. It also includes restore --sparse, required for correct-size restores;
+# without that flag a source occupying 500 GB can expand to its multi-TiB logical
+# size. Older generic exit codes cannot safely drive automatic initialization.
+MIN_VERSION = (0, 17, 0)
+RECOMMENDED_VERSION = (0, 19, 1)
 
 _VERSION_RE = re.compile(r"restic\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def _repo_missing_error(exc: util.CommandError) -> bool:
+    """Whether ``cat config`` proved that no repository exists.
+
+    restic >= 0.17 has a dedicated exit code 10 for this case. Older versions
+    use the ambiguous code 1 for both a missing repository and operational
+    failures. Diagnostic text is not a stable interface, so fail closed for
+    every code other than 10.
+    """
+    return exc.returncode == 10
 
 
 def restic_version() -> Optional[Tuple[int, int, int]]:
@@ -137,7 +149,11 @@ def build_forget(repo: str, key_file: str, retention: Dict[str, Any], tags: List
 def build_restore(
     repo: str, key_file: str, snapshot: str, target: str, paths: Optional[List[str]] = None
 ) -> List[str]:
-    argv = base_args(repo, key_file) + ["restore", snapshot, "--target", target]
+    # restic stores file contents, not the original sparse-hole map. --sparse
+    # recreates holes for long zero ranges instead of allocating physical blocks.
+    argv = base_args(repo, key_file) + [
+        "restore", snapshot, "--target", target, "--sparse",
+    ]
     for p in (paths or []):
         argv += ["--path", p]
     return argv
@@ -169,11 +185,18 @@ def build_snapshots(repo: str, key_file: str, latest: bool = True) -> List[str]:
 
 # --- execution helpers ------------------------------------------------------
 def repo_initialized(repo: str, key_file: str) -> bool:
+    """Return false only when restic positively reports a missing repository.
+
+    Access/configuration failures are raised so callers retain restic's original
+    diagnostic instead of attempting ``init`` on an existing repository.
+    """
     try:
         util.run(base_args(repo, key_file) + ["cat", "config"], capture=True, check=True)
         return True
-    except util.CommandError:
-        return False
+    except util.CommandError as exc:
+        if _repo_missing_error(exc):
+            return False
+        raise
 
 
 def ensure_init(repo: str, key_file: str) -> None:
