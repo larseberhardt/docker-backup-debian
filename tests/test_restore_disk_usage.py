@@ -713,6 +713,55 @@ class RestoreDiskUsageTest(unittest.TestCase):
             compose_file, dest, "snipeit-mysql", "snipeit"
         )
 
+    def test_cross_server_dry_run_does_not_resolve_source_database_password(self):
+        util.set_dry_run(True)
+        db = {
+            "service": "snipeit-mysql",
+            "engine": "mysql",
+            "auth_user": "root",
+            "password_source": "env:MYSQL_ROOT_PASSWORD",
+            "databases": ["snipe"],
+            "all_databases": False,
+        }
+        cfg = {
+            "name": "snipeit",
+            "repo": "/mnt/backups/snipeit",
+            "key_file": "/etc/docker-backup/keys/snipeit.key",
+            "backend_env_file": None,
+            "stack_path": "/opt/snipeit",
+            # Cross-server manifests deliberately contain only the basename.
+            "compose_file": "docker-compose.yml",
+            "project_name": "snipeit",
+            "extra_backup_paths": [],
+            "named_volumes": [],
+            "db_services": [db],
+        }
+        dest = "/opt/snipeit-drill"
+        target_compose = "/opt/snipeit-drill/docker-compose.yml"
+
+        with mock.patch.object(restore_cmd.restic, "restore"), \
+             mock.patch.object(
+                 restore_cmd.runtime, "resolve_password",
+                 side_effect=AssertionError(
+                     "dry-run must not read source Compose credentials"
+                 ),
+             ) as resolve_password, \
+             mock.patch.object(restore_cmd.compose, "up_service"), \
+             mock.patch.object(restore_cmd.compose, "rm_service"), \
+             mock.patch.object(restore_cmd.dbdump, "wait_ready", return_value=True), \
+             mock.patch.object(restore_cmd.dbdump, "import_dump") as import_dump:
+            rc = restore_cmd._run_restore(
+                cfg, "snipeit", dest, "snapshot-id", force=False,
+                no_custom_restore=True,
+            )
+
+        self.assertEqual(rc, 0)
+        resolve_password.assert_not_called()
+        import_dump.assert_called_once_with(
+            db, None, target_compose, dest, "snipeit-drill",
+            "/opt/snipeit-drill/.docker-backup/dumps", dumps_fd=None,
+        )
+
     def test_partial_database_start_failure_still_removes_service(self):
         db = {"service": "db", "engine": "mysql", "password_source": "none"}
         cfg = {"db_services": [db]}

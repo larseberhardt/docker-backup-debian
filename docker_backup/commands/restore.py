@@ -2648,7 +2648,17 @@ def _import_databases(
             raise util.CommandError(["restore", dumps_dir], 1, str(exc))
     try:
         for db in cfg.get("db_services") or []:
-            password = runtime.resolve_password(cfg, db, cj or None)
+            # A dry-run never places/parses the restored Compose tree, so ``cj``
+            # is intentionally empty here.  Falling back to cfg's source-side
+            # compose_file/stack_path would make a cross-server dry-run inspect a
+            # path that does not exist on the target (and stored credentials must
+            # not be read merely to print a plan).  The real restore has the
+            # authenticated target Compose model and resolves the password below
+            # as before.
+            password = (
+                None if util.DRY_RUN
+                else runtime.resolve_password(cfg, db, cj or None)
+            )
             util.info("Starting DB service '%s' for the import…" % db["service"])
             try:
                 # Do not start `depends_on` services: only the isolated database is
