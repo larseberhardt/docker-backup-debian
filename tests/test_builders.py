@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import io
+import os
+import shutil
+import tarfile
+import tempfile
 import unittest
+from unittest import mock
 
 import _support  # noqa: F401
 
@@ -33,9 +39,47 @@ class ResticBuilderTest(unittest.TestCase):
         self.assertIn("stack:xibo", argv)
         self.assertEqual(argv[-1], "/opt/xibo")
 
-    def test_restore_recreates_sparse_files(self):
-        argv = restic.build_restore("/repo", "/k.key", "latest", "/scratch")
+    def test_restore_preserves_sparse_disk_usage(self):
+        argv = restic.build_restore(
+            "/repo", "/k.key", "latest", "/scratch", paths=["/opt/nextcloud"]
+        )
         self.assertIn("--sparse", argv)
+        self.assertEqual(argv[argv.index("--target") + 1], "/scratch")
+        self.assertEqual(argv[argv.index("--path") + 1], "/opt/nextcloud")
+
+    def test_restore_can_anchor_target_to_inherited_directory_fd(self):
+        with mock.patch.object(restic.os.path, "isdir", return_value=True), \
+                mock.patch.object(restic.util, "run") as run:
+            restic.restore(
+                "/repo", "/k.key", "snapshot", "/display/scratch",
+                paths=["/opt/gitlab"], target_fd=17,
+            )
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--target") + 1], "/proc/self/fd/17")
+        self.assertEqual(run.call_args.kwargs["pass_fds"], (17,))
+
+    def test_latest_snapshot_filter_requires_all_stack_tags(self):
+        argv = restic.build_snapshots(
+            "/repo", "/k.key", latest=True,
+            tags=["docker-backup", "stack:xibo"], group_by="tags",
+        )
+        self.assertEqual(argv[argv.index("--tag") + 1], "docker-backup,stack:xibo")
+        self.assertEqual(argv[argv.index("--group-by") + 1], "tags")
+        self.assertEqual(argv[argv.index("--latest") + 1], "1")
+
+    def test_tagged_last_snapshot_uses_tag_grouping(self):
+        payload = '[{"id":"%s","time":"2026-07-15T00:00:00Z"}]' % ("a" * 64)
+        with mock.patch.object(
+            restic.util, "run", return_value=mock.Mock(stdout=payload),
+        ) as run:
+            snapshot = restic.last_snapshot(
+                "/repo", "/k.key", tags=["docker-backup", "stack:xibo"],
+            )
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--group-by") + 1], "tags")
+        self.assertEqual(snapshot["id"], "a" * 64)
 
     def test_forget_retention_flags(self):
         argv = restic.build_forget("/repo", "/k.key", {"daily": 7, "weekly": 4, "monthly": 6}, ["docker-backup"])
@@ -145,7 +189,9 @@ class VolumeBuilderTest(unittest.TestCase):
         # would force a full re-upload of the volume on every run.
         self.assertIn("cf", argv)
         self.assertNotIn("czf", argv)
-        self.assertIn("/backup/library.tar", argv)
+        self.assertEqual(argv[argv.index("cf") + 1], "-")
+        self.assertNotIn(":/backup", " ".join(argv))
+        self.assertNotIn("/opt/xibo/.docker-backup/volumes", " ".join(argv))
 
     def test_restore_cmd_extracts(self):
         argv = volumes.build_restore_cmd(
@@ -154,7 +200,8 @@ class VolumeBuilderTest(unittest.TestCase):
         joined = " ".join(argv)
         self.assertIn("xibo_library:/volume", joined)
         self.assertNotIn(":ro", joined)  # restore mounts writable
-        self.assertIn("tar xf /backup/library.tar", joined)
+        self.assertNotIn(":/backup", joined)  # archive is streamed from a verified FD
+        self.assertIn("tar xf - -C /volume", joined)
 
     def test_restore_cmd_legacy_gzip(self):
         # Legacy snapshots (early gzip builds) contain <key>.tar.gz → extract with -z.
@@ -162,7 +209,42 @@ class VolumeBuilderTest(unittest.TestCase):
             "xibo_library", "/opt/xibo/.docker-backup/volumes",
             volumes.legacy_archive_name("library"),
         )
-        self.assertIn("tar xzf /backup/library.tar.gz", " ".join(argv))
+        self.assertIn("tar xzf - -C /volume", " ".join(argv))
+
+    def test_restore_cmd_rejects_archive_path_traversal(self):
+        with self.assertRaises(ValueError):
+            volumes.build_restore_cmd("xibo_library", "/backup", "../../etc/passwd")
+
+    def test_restore_streams_verified_archive_instead_of_host_bind(self):
+        staging = os.path.realpath(tempfile.mkdtemp())
+        try:
+            archive = os.path.join(staging, volumes.archive_name("library"))
+            payload = b"tar payload"
+            with tarfile.open(archive, "w") as tar:
+                info = tarfile.TarInfo("payload.txt")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+            with open(archive, "rb") as fh:
+                archive_payload = fh.read()
+            staging_fd = volumes._open_staging_dir(staging)
+            seen = []
+
+            def consume(_argv, **kwargs):
+                seen.append(kwargs["stdin"].read())
+                return mock.Mock(returncode=0)
+
+            try:
+                with mock.patch.object(volumes.util, "run", side_effect=consume) as run:
+                    volumes.restore_named_volume(
+                        "xibo_library", staging, "library", staging_fd=staging_fd,
+                    )
+            finally:
+                os.close(staging_fd)
+
+            self.assertEqual(seen, [archive_payload])
+            self.assertNotIn(staging, " ".join(run.call_args.args[0]))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 if __name__ == "__main__":

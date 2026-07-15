@@ -21,15 +21,21 @@ def _mode(path):
 class StagingPermsTest(unittest.TestCase):
     def setUp(self):
         util.set_dry_run(False)
-        self.tmp = tempfile.mkdtemp()
+        # macOS exposes /var as a symlink to /private/var.  The production
+        # staging walker deliberately refuses symlink ancestors, so exercise it
+        # through the canonical path returned by realpath.
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
 
     def test_staging_dirs_are_root_only(self):
         staging = os.path.join(self.tmp, ".docker-backup")
         dumps = os.path.join(staging, "dumps")
         vols = os.path.join(staging, "volumes")
-        run_cmd._prepare_staging(staging, [dumps, vols])
-        for d in (staging, dumps, vols):
-            self.assertEqual(_mode(d), 0o700, d)
+        refs = run_cmd._prepare_staging(staging, [dumps, vols])
+        try:
+            for d in (staging, dumps, vols):
+                self.assertEqual(_mode(d), 0o700, d)
+        finally:
+            run_cmd._cleanup_staging(refs)
 
     def test_dump_file_is_owner_only(self):
         out = os.path.join(self.tmp, "dumps", "db.sql")
@@ -52,7 +58,7 @@ class CleanupOnFailureTest(unittest.TestCase):
 
     def setUp(self):
         util.set_dry_run(False)
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.stack = os.path.join(self.tmp, "stack")
         os.makedirs(self.stack)
         self._patches = [
@@ -60,6 +66,14 @@ class CleanupOnFailureTest(unittest.TestCase):
             mock.patch.object(run_cmd, "manifest"),
             mock.patch.object(run_cmd, "hooks"),
             mock.patch.object(run_cmd.util, "assert_mounted"),
+            mock.patch.object(
+                run_cmd.compose, "running_writable_bind_mounts_overlapping",
+                return_value=[],
+            ),
+            mock.patch.object(
+                run_cmd.compose, "config_json",
+                return_value={"name": "app", "services": {}, "volumes": {}},
+            ),
         ]
         for p in self._patches:
             p.start()

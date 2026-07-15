@@ -6,6 +6,7 @@ variable (used for tests).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -108,6 +109,11 @@ def config_path(name: str) -> str:
     return os.path.join(configs_dir(), sanitize_name(name) + ".json")
 
 
+def mutation_lock_path(name: str) -> str:
+    """Per-name lock shared by create and restore config publication."""
+    return os.path.join(configs_dir(), ".%s.config.lock" % sanitize_name(name))
+
+
 def exists(name: str) -> bool:
     try:
         return os.path.exists(config_path(name))
@@ -137,6 +143,39 @@ def save(cfg: Dict[str, Any]) -> str:
     finally:
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
+    return path
+
+
+def save_new(cfg: Dict[str, Any]) -> str:
+    """Atomically publish a config only if that name is still absent.
+
+    ``os.replace`` is correct for normal updates but unsafe for restore bootstrap:
+    it could overwrite a config created concurrently after the preflight. A hard
+    link gives us an atomic no-replace publication on the local /etc filesystem.
+    """
+    ensure_dirs()
+    name = sanitize_name(cfg["name"])
+    cfg["schema_version"] = SCHEMA_VERSION
+    path = config_path(name)
+    data = json.dumps(cfg, indent=2) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=configs_dir(), prefix="." + name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o640)
+        try:
+            os.link(tmp, path)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                raise FileExistsError("Config already exists: %s" % path)
+            raise
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     return path
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config, hooks, restic, util
@@ -33,6 +34,10 @@ _ALLOWED_HOOK_KEYS = {"cmd", "on_failure", "timeout", "cwd", "name"}
 _ALLOWED_RETENTION_KEYS = {"daily", "weekly", "monthly", "keep_within"}
 
 
+def valid_name(name: Any) -> bool:
+    return isinstance(name, str) and bool(_NAME_RE.match(name))
+
+
 # --- paths / discovery ------------------------------------------------------
 def builtin_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
@@ -42,9 +47,13 @@ def override_dir() -> str:
     return os.path.join(config.etc_dir(), "templates")
 
 
-def _dirs() -> List[str]:
+def _sources() -> List[Tuple[str, str]]:
     # Operator override first (wins), then the bundled templates.
-    return [override_dir(), builtin_dir()]
+    return [("operator", override_dir()), ("builtin", builtin_dir())]
+
+
+def _dirs() -> List[str]:
+    return [d for _source, d in _sources()]
 
 
 def list_templates() -> List[str]:
@@ -59,30 +68,99 @@ def list_templates() -> List[str]:
     return sorted(names)
 
 
-def _path(name: str) -> Optional[str]:
-    if not _NAME_RE.match(name or ""):
+def _validate_name(name: str) -> str:
+    if not valid_name(name):
         raise util.CommandError(["--from-template"], 2, "Invalid template name: %r" % name)
-    for d in _dirs():
+    return name
+
+
+def _path_with_source(name: str) -> Optional[Tuple[str, str]]:
+    name = _validate_name(name)
+    for source, d in _sources():
         p = os.path.join(d, name + ".json")
         if os.path.exists(p):
-            return p
+            return p, source
     return None
 
 
-def load(name: str) -> Dict[str, Any]:
-    p = _path(name)
-    if p is None:
-        raise util.CommandError(
-            ["--from-template"], 2,
-            "No template '%s'. Available: %s" % (name, ", ".join(list_templates()) or "—"),
-        )
-    with open(p) as f:
+def _path(name: str) -> Optional[str]:
+    found = _path_with_source(name)
+    return found[0] if found else None
+
+
+def _load_path(name: str, path: str) -> Dict[str, Any]:
+    with open(path) as f:
         try:
             t = json.load(f)
         except ValueError as exc:
             raise util.CommandError(["--from-template"], 2,
                                     "Template '%s' is not valid JSON: %s" % (name, exc))
     return validate(t)
+
+
+def load(name: str) -> Dict[str, Any]:
+    found = _path_with_source(name)
+    if found is None:
+        raise util.CommandError(
+            ["--from-template"], 2,
+            "No template '%s'. Available: %s" % (name, ", ".join(list_templates()) or "—"),
+        )
+    return _load_path(name, found[0])
+
+
+def load_with_source(name: str) -> Tuple[Dict[str, Any], str]:
+    """Load the winning local template and report its real provenance."""
+    found = _path_with_source(name)
+    if found is None:
+        raise util.CommandError(
+            ["--from-template"], 2,
+            "No template '%s'. Available: %s" % (name, ", ".join(list_templates()) or "—"),
+        )
+    path, source = found
+    return _load_path(name, path), source
+
+
+def load_exact(name: str, source: str) -> Dict[str, Any]:
+    """Load only the requested trusted local source, with no fallback.
+
+    This is the restore-time loader. A plaintext manifest must never be able to
+    smuggle shell or make an operator override shadow a descriptor that says
+    ``builtin``.
+    """
+    name = _validate_name(name)
+    if source == "builtin":
+        directory = builtin_dir()
+    elif source == "operator":
+        directory = override_dir()
+    else:
+        raise util.CommandError(
+            ["--use-template-hooks"], 2,
+            "Unsupported template source %r (expected 'builtin' or 'operator')." % source,
+        )
+    path = os.path.join(directory, name + ".json")
+    if not os.path.isfile(path):
+        raise util.CommandError(
+            ["--use-template-hooks"], 2,
+            "Local %s template '%s' is not installed." % (source, name),
+        )
+    if source == "operator":
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise util.CommandError(
+                ["--use-template-hooks"], 2,
+                "Operator template '%s' must be a regular file, not a symlink." % name,
+            )
+        if st.st_mode & 0o022:
+            raise util.CommandError(
+                ["--use-template-hooks"], 2,
+                "Operator template '%s' is group/world-writable; refusing root hooks." % name,
+            )
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and st.st_uid != 0:
+            raise util.CommandError(
+                ["--use-template-hooks"], 2,
+                "Operator template '%s' is not owned by root." % name,
+            )
+    return _load_path(name, path)
 
 
 # --- validation -------------------------------------------------------------
@@ -167,9 +245,22 @@ def proposed_commands(t: Dict[str, Any]) -> List[Tuple[str, str]]:
     return out
 
 
-def provenance(t: Dict[str, Any], source: str = "builtin") -> Dict[str, Any]:
+def provenance(t: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any]:
+    if source is None:
+        found = _path_with_source(str(t.get("name") or ""))
+        if found is None:
+            raise util.CommandError(
+                ["--from-template"], 2,
+                "Cannot determine provenance for template %r." % t.get("name"),
+            )
+        source = found[1]
     return {"name": t.get("name"), "version": str(t.get("template_schema_version", 1)),
             "source": source}
+
+
+def hook_definition_fingerprint(t: Dict[str, Any]) -> str:
+    """Compatibility hash for locally reconstructed template hooks."""
+    return hooks.compute_definition_fingerprint(to_hooks(t))
 
 
 def detect_template(compose_json: Dict[str, Any]) -> Optional[str]:

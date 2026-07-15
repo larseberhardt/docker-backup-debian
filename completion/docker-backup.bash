@@ -51,7 +51,7 @@ _docker_backup() {
             ;;
         restore)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--from --from-repo --key-file --name --save-config --snapshot --force --no-custom-restore --restore-cmd" -- "$cur") )
+                COMPREPLY=( $(compgen -W "--from --from-repo --key-file --name --save-config --snapshot --force --no-custom-restore --restore-cmd --use-template-hooks" -- "$cur") )
             else
                 _filedir -d
             fi

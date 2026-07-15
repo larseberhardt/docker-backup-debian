@@ -12,7 +12,8 @@ from docker_backup.commands import restore as restore_cmd
 
 def _args(**kw):
     base = dict(dest="/opt/xibo-test", from_name=None, from_repo=None, key_file=None,
-                bootstrap_name=None, save_config=False, snapshot="latest", force=True)
+                bootstrap_name=None, save_config=False, snapshot="latest", force=True,
+                restore_cmd=None, no_custom_restore=False, use_template_hooks=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -72,6 +73,26 @@ class RestoreBootstrapTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(restore_cmd.restic.restore.called)
 
+    def test_manifest_stack_path_traversal_is_rejected_before_restic(self):
+        man = _sample_manifest()
+        man["stack_path"] = "/../../etc"
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man):
+            rc = restore_cmd.cmd_restore(
+                _args(from_repo="/mnt/backups/xibo", key_file="/root/xibo.key")
+            )
+        self.assertEqual(rc, 1)
+        self.assertFalse(restore_cmd.restic.restore.called)
+
+    def test_manifest_named_volume_shell_token_is_rejected_before_restic(self):
+        man = _sample_manifest()
+        man["named_volumes"] = [{"key": "data;touch-pwn", "real_name": "app_data"}]
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man):
+            rc = restore_cmd.cmd_restore(
+                _args(from_repo="/mnt/backups/xibo", key_file="/root/xibo.key")
+            )
+        self.assertEqual(rc, 1)
+        self.assertFalse(restore_cmd.restic.restore.called)
+
     def test_missing_key_errors(self):
         with mock.patch.object(restore_cmd.manifest, "read",
                                return_value=_sample_manifest()):
@@ -95,6 +116,62 @@ class RestoreBootstrapTest(unittest.TestCase):
                 _args(from_repo="/mnt/backups/xibo", key_file="/root/xibo.key",
                       bootstrap_name="xibo-test"))
         self.assertEqual(rc, 0)
+
+    def test_required_custom_restore_fails_before_restic_without_command(self):
+        man = _sample_manifest()
+        man["custom_restore_required"] = True
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man):
+            rc = restore_cmd.cmd_restore(
+                _args(from_repo="/mnt/backups/gitlab", key_file="/root/gitlab.key")
+            )
+        self.assertEqual(rc, 1)
+        self.assertFalse(restore_cmd.restic.restore.called)
+
+    def test_required_custom_restore_accepts_cli_command(self):
+        man = _sample_manifest()
+        man["custom_restore_required"] = True
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man):
+            rc = restore_cmd.cmd_restore(_args(
+                from_repo="/mnt/backups/gitlab", key_file="/root/gitlab.key",
+                restore_cmd="docker exec gitlab gitlab-backup restore FORCE=yes",
+            ))
+        self.assertEqual(rc, 0)
+        self.assertTrue(restore_cmd.restic.restore.called)
+
+    def test_declined_required_custom_restore_returns_failure(self):
+        man = _sample_manifest()
+        man["custom_restore_required"] = True
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man), \
+             mock.patch.object(restore_cmd, "_custom_restore", return_value=False):
+            rc = restore_cmd.cmd_restore(_args(
+                from_repo="/mnt/backups/gitlab", key_file="/root/gitlab.key",
+                restore_cmd="docker exec gitlab gitlab-backup restore FORCE=yes",
+            ))
+        self.assertEqual(rc, 1)
+
+    def test_custom_restore_flags_are_mutually_exclusive(self):
+        with mock.patch.object(restore_cmd.manifest, "read") as read:
+            rc = restore_cmd.cmd_restore(_args(
+                from_repo="/mnt/backups/gitlab", key_file="/root/gitlab.key",
+                restore_cmd="docker exec gitlab gitlab-backup restore FORCE=yes",
+                no_custom_restore=True,
+            ))
+        self.assertEqual(rc, 1)
+        read.assert_not_called()
+
+    def test_required_custom_restore_config_is_not_saved_without_hooks(self):
+        man = _sample_manifest()
+        man["custom_restore_required"] = True
+        with mock.patch.object(restore_cmd.manifest, "read", return_value=man), \
+             mock.patch.object(restore_cmd.config, "save") as save:
+            rc = restore_cmd.cmd_restore(_args(
+                from_repo="/mnt/backups/gitlab", key_file="/root/gitlab.key",
+                save_config=True,
+            ))
+
+        self.assertEqual(rc, 1)
+        save.assert_not_called()
+        self.assertFalse(restore_cmd.restic.restore.called)
 
 
 class RestoreLegacyRegressionTest(unittest.TestCase):

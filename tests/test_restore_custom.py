@@ -38,6 +38,7 @@ class RestoreCustomTest(unittest.TestCase):
             mock.patch.object(restore_cmd, "_restore_named_volumes"),
             mock.patch.object(restore_cmd, "_import_databases"),
             mock.patch.object(restore_cmd.compose, "up_all"),
+            mock.patch.object(restore_cmd.compose, "down_all"),
             mock.patch.object(restore_cmd.hooks, "run_hooks"),
         ]
         for p in self._patches:
@@ -55,6 +56,7 @@ class RestoreCustomTest(unittest.TestCase):
         self.assertTrue(restore_cmd.compose.up_all.called)      # stack brought up before the hook
         self.assertTrue(restore_cmd.hooks.run_hooks.called)
         self.assertEqual(restore_cmd.hooks.run_hooks.call_args.args[1], "restore")
+        self.assertTrue(restore_cmd.compose.down_all.called)  # transient bind paths removed
 
     def test_no_custom_restore_forces_builtin(self):
         rc = restore_cmd._run_restore(_cfg(), "gitlab", "/opt/gitlab-test", "latest", True,
@@ -62,6 +64,7 @@ class RestoreCustomTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(restore_cmd._import_databases.called)
         self.assertFalse(restore_cmd.compose.up_all.called)
+        self.assertFalse(restore_cmd.compose.down_all.called)
 
     def test_no_restore_hook_uses_builtin(self):
         cfg = _cfg()
@@ -69,6 +72,20 @@ class RestoreCustomTest(unittest.TestCase):
         rc = restore_cmd._run_restore(cfg, "gitlab", "/opt/gitlab-test", "latest", True)
         self.assertEqual(rc, 0)
         self.assertTrue(restore_cmd._import_databases.called)
+
+    def test_partial_stack_start_failure_still_tears_project_down(self):
+        restore_cmd.compose.up_all.side_effect = RuntimeError("partial up failed")
+
+        with self.assertRaisesRegex(RuntimeError, "partial up failed"):
+            restore_cmd._custom_restore(
+                _cfg(), "/runtime-compose", "/stable/project", "gitlab",
+                already_confirmed=True,
+            )
+
+        restore_cmd.compose.down_all.assert_called_once_with(
+            "/runtime-compose", "/stable/project", "gitlab",
+        )
+        restore_cmd.hooks.run_hooks.assert_not_called()
 
 
 if __name__ == "__main__":

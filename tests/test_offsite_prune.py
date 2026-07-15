@@ -44,6 +44,10 @@ class OffsitePruneFlowTest(unittest.TestCase):
         self._patches = [
             mock.patch.object(run_cmd, "restic"),
             mock.patch.object(run_cmd, "manifest"),
+            mock.patch.object(
+                run_cmd.compose, "config_json",
+                return_value={"name": "app", "services": {}, "volumes": {}},
+            ),
         ]
         for p in self._patches:
             p.start()

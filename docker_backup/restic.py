@@ -7,7 +7,10 @@ and never interactively.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import util
@@ -17,18 +20,23 @@ from . import util
 # without that flag a source occupying 500 GB can expand to its multi-TiB logical
 # size. Older generic exit codes cannot safely drive automatic initialization.
 MIN_VERSION = (0, 17, 0)
+# Current stable release when this floor was last reviewed. Newer restic versions
+# contain important restore progress, hard-link and metadata error handling fixes.
 RECOMMENDED_VERSION = (0, 19, 1)
 
 _VERSION_RE = re.compile(r"restic\s+(\d+)\.(\d+)\.(\d+)")
+_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _repo_missing_error(exc: util.CommandError) -> bool:
     """Whether ``cat config`` proved that no repository exists.
 
-    restic >= 0.17 has a dedicated exit code 10 for this case. Older versions
+    restic >= 0.17 has a dedicated exit code 10 for this case.  Older versions
     use the ambiguous code 1 for both a missing repository and operational
-    failures. Diagnostic text is not a stable interface, so fail closed for
-    every code other than 10.
+    failures.  Diagnostic text is not a stable interface, so fail closed for
+    every code other than 10: treating an access/cache/password error as an
+    empty location and calling ``init`` would hide the real failure behind
+    ``config file already exists``.
     """
     return exc.returncode == 10
 
@@ -110,8 +118,11 @@ def build_backup(
     paths: List[str],
     excludes: List[str],
     tags: List[str],
+    json_output: bool = False,
 ) -> List[str]:
     argv = base_args(repo, key_file) + ["backup"]
+    if json_output:
+        argv += ["--json"]
     for t in tags:
         argv += ["--tag", t]
     for e in excludes:
@@ -150,7 +161,8 @@ def build_restore(
     repo: str, key_file: str, snapshot: str, target: str, paths: Optional[List[str]] = None
 ) -> List[str]:
     # restic stores file contents, not the original sparse-hole map. --sparse
-    # recreates holes for long zero ranges instead of allocating physical blocks.
+    # detects long zero runs while restoring and creates holes again. Without it,
+    # logical zero ranges can consume physical disk blocks after a restore.
     argv = base_args(repo, key_file) + [
         "restore", snapshot, "--target", target, "--sparse",
     ]
@@ -176,8 +188,19 @@ def build_check(
     return argv
 
 
-def build_snapshots(repo: str, key_file: str, latest: bool = True) -> List[str]:
+def build_snapshots(
+    repo: str, key_file: str, latest: bool = True,
+    tags: Optional[List[str]] = None,
+    group_by: Optional[str] = None,
+) -> List[str]:
     argv = base_args(repo, key_file) + ["snapshots", "--json"]
+    if tags:
+        # A comma-separated tag list is AND in restic; repeated --tag values are
+        # OR. The manifest must bind to this stack's just-created tagged snapshot,
+        # not an unrelated manual snapshot that happened to be newer.
+        argv += ["--tag", ",".join(tags)]
+    if group_by:
+        argv += ["--group-by", group_by]
     if latest:
         argv += ["--latest", "1"]
     return argv
@@ -187,8 +210,8 @@ def build_snapshots(repo: str, key_file: str, latest: bool = True) -> List[str]:
 def repo_initialized(repo: str, key_file: str) -> bool:
     """Return false only when restic positively reports a missing repository.
 
-    Access/configuration failures are raised so callers retain restic's original
-    diagnostic instead of attempting ``init`` on an existing repository.
+    Access/configuration failures are intentionally raised so callers retain
+    restic's original exit code and diagnostic instead of attempting ``init``.
     """
     try:
         util.run(base_args(repo, key_file) + ["cat", "config"], capture=True, check=True)
@@ -213,9 +236,71 @@ def ensure_init_offsite(offsite: str, key_file: str, primary: str) -> None:
     util.run(build_init_offsite(offsite, key_file, primary), capture=True, mutating=True)
 
 
-def backup(repo, key_file, paths, excludes, tags) -> None:
+def _snapshot_id_from_backup_message(line: str) -> Optional[str]:
+    """Extracts the full id from one ``restic backup --json`` summary line."""
+    try:
+        message = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(message, dict) or message.get("message_type") != "summary":
+        return None
+    snapshot_id = message.get("snapshot_id")
+    if isinstance(snapshot_id, str) and _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        return snapshot_id
+    return None
+
+
+def backup(repo, key_file, paths, excludes, tags) -> Optional[str]:
+    """Runs a backup and returns the exact full id emitted by that invocation.
+
+    JSON output is forwarded line-by-line instead of being captured until the
+    command exits. This keeps long-running backups visibly active in a terminal
+    or the systemd journal while letting the caller bind metadata to the summary
+    produced by this exact process.
+
+    ``None`` means restic succeeded but did not emit a valid summary id. Callers
+    must not replace it with a ``latest`` lookup, which could select a different
+    snapshot created concurrently or manually.
+    """
     util.info("restic backup → %s" % repo)
-    util.run(build_backup(repo, key_file, paths, excludes, tags), capture=False, mutating=True)
+    argv = build_backup(repo, key_file, paths, excludes, tags, json_output=True)
+
+    # Preserve util.run's dry-run contract without starting a subprocess.
+    if util.DRY_RUN:
+        util.run(argv, capture=False, mutating=True)
+        return None
+
+    util.debug("run: " + util.fmt_argv(argv))
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            # Keep stderr attached to the terminal/journal, matching the old
+            # capture=False behaviour and preserving restic diagnostics.
+            stderr=None,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise util.CommandError(argv, 127, str(exc))
+
+    snapshot_id = None  # type: Optional[str]
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        # --json is deliberately still visible: status messages arrive while a
+        # large backup runs rather than appearing only after it completes.
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        parsed = _snapshot_id_from_backup_message(line)
+        if parsed is not None:
+            snapshot_id = parsed
+
+    returncode = proc.wait()
+    if returncode != 0:
+        raise util.CommandError(argv, returncode)
+    return snapshot_id
 
 
 def forget_prune(repo, key_file, retention, tags) -> None:
@@ -223,9 +308,23 @@ def forget_prune(repo, key_file, retention, tags) -> None:
     util.run(build_forget(repo, key_file, retention, tags), capture=False, mutating=True)
 
 
-def restore(repo, key_file, snapshot, target, paths=None) -> None:
+def restore(repo, key_file, snapshot, target, paths=None, target_fd=None) -> None:
     util.info("restic restore %s → %s" % (snapshot, target))
-    util.run(build_restore(repo, key_file, snapshot, target, paths), capture=False, mutating=True)
+    pass_fds = ()
+    command_target = target
+    if target_fd is not None:
+        proc_fd_root = "/proc/self/fd"
+        if not os.path.isdir(proc_fd_root):
+            raise util.CommandError(
+                ["restic", "restore"], 1,
+                "Safe descriptor-backed restore requires Linux /proc/self/fd.",
+            )
+        command_target = os.path.join(proc_fd_root, str(target_fd))
+        pass_fds = (target_fd,)
+    util.run(
+        build_restore(repo, key_file, snapshot, command_target, paths),
+        capture=False, mutating=True, pass_fds=pass_fds,
+    )
 
 
 def check(repo, key_file, read_data=False, read_data_subset=None) -> bool:
@@ -249,9 +348,20 @@ def unlock(repo, key_file) -> None:
     util.run(base_args(repo, key_file) + ["unlock"], capture=True, mutating=True, check=False)
 
 
-def last_snapshot(repo: str, key_file: str) -> Optional[Dict[str, Any]]:
+def last_snapshot(
+    repo: str, key_file: str, tags: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
     try:
-        proc = util.run(build_snapshots(repo, key_file, latest=True), capture=True, check=True)
+        proc = util.run(
+            # Match the retention grouping when filtering by the fixed stack
+            # tags. Otherwise restic's default host,paths grouping can return
+            # several "latest" snapshots after a host rename or path change.
+            build_snapshots(
+                repo, key_file, latest=True, tags=tags,
+                group_by="tags" if tags else None,
+            ),
+            capture=True, check=True,
+        )
     except util.CommandError:
         return None
     try:
@@ -259,3 +369,28 @@ def last_snapshot(repo: str, key_file: str) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError:
         return None
     return data[-1] if isinstance(data, list) and data else None
+
+
+def snapshot_by_id(
+    repo: str, key_file: str, snapshot_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Returns ``snapshot_id`` only when that exact full snapshot still exists."""
+    if not isinstance(snapshot_id, str) or not _SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        return None
+    try:
+        proc = util.run(
+            base_args(repo, key_file) + ["snapshots", "--json", snapshot_id],
+            capture=True, check=True,
+        )
+    except util.CommandError:
+        return None
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, list):
+        return None
+    for snapshot in data:
+        if isinstance(snapshot, dict) and snapshot.get("id") == snapshot_id:
+            return snapshot
+    return None

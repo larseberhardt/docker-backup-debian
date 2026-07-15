@@ -44,7 +44,10 @@ def cmd_create(args) -> int:
         return 2
 
     if not args.all:
-        tmpl = templates.load(args.from_template) if getattr(args, "from_template", None) else None
+        tmpl = None
+        tmpl_source = None
+        if getattr(args, "from_template", None):
+            tmpl, tmpl_source = templates.load_with_source(args.from_template)
         # Resolution: explicit CLI flag > template > built-in default.
         db_auto = getattr(args, "db_autodetect", None)
         if db_auto is None:
@@ -73,7 +76,7 @@ def cmd_create(args) -> int:
             allow_hooks=getattr(args, "allow_hooks", False),
             hooks_override=templates.to_hooks(tmpl) if tmpl else None,
             retention_override=(tmpl or {}).get("retention"),
-            template=templates.provenance(tmpl) if tmpl else None,
+            template=templates.provenance(tmpl, source=tmpl_source) if tmpl else None,
         )
 
     if args.auto:
@@ -116,7 +119,8 @@ def create_one(
 
     name = config.sanitize_name(name or os.path.basename(stack_path.rstrip("/")))
 
-    if config.exists(name) and not force:
+    config_was_present = config.exists(name)
+    if config_was_present and not force:
         if interactive:
             if not wizard.confirm("Config '%s' already exists. Overwrite?" % name, default=False):
                 util.info("Aborted.")
@@ -244,11 +248,19 @@ def create_one(
         mount_check=mount_check,
     )
 
-    cfg["key_file"] = keys.ensure_key(name)
-    path = config.save(cfg)
-    util.info("Config written: %s" % path)
+    config.ensure_dirs()
+    create_new = not config_was_present and not force
+    with util.FileLock(config.mutation_lock_path(name)):
+        if create_new and config.exists(name):
+            util.error(
+                "Config '%s' was created concurrently; refusing to overwrite it." % name
+            )
+            return 1
+        cfg["key_file"] = keys.ensure_key(name)
+        path = config.save_new(cfg) if create_new else config.save(cfg)
+        util.info("Config written: %s" % path)
 
-    _install_timer(name, oncalendar)
+        _install_timer(name, oncalendar)
 
     if not util.DRY_RUN:
         _print_escrow(name)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -78,6 +79,15 @@ class ToHooksTest(unittest.TestCase):
         self.assertEqual(hk["pre_backup"][0]["cwd"], "stack")
         self.assertTrue(hk["pre_backup"][0]["timeout"] > 0)
 
+    def test_hook_definition_fingerprint_changes_with_template_hook(self):
+        a = _valid()
+        b = copy.deepcopy(a)
+        b["hooks"]["pre_backup"][0]["cwd"] = "/tmp"
+        self.assertNotEqual(
+            templates.hook_definition_fingerprint(a),
+            templates.hook_definition_fingerprint(b),
+        )
+
 
 class ShippedTemplatesTest(unittest.TestCase):
     """Every shipped template must be valid (otherwise CI fails)."""
@@ -95,6 +105,38 @@ class ShippedTemplatesTest(unittest.TestCase):
         self.assertIn("supabase", names)
         for n in names:
             templates.load(n)  # validates; raises on error
+
+    def test_gitlab_restore_waits_for_first_boot_and_never_prompts(self):
+        gitlab = templates.load("gitlab")
+        restore = gitlab["hooks"]["restore"]
+        self.assertEqual(len(restore), 1)
+        command = restore[0]["cmd"]
+        self.assertIn("gitlab-rake gitlab:env:info", command)
+        self.assertIn("Waiting for GitLab initialization", command)
+        self.assertIn('"$attempt" -ge 60', command)
+        self.assertIn("GITLAB_ASSUME_YES=1", command)
+        self.assertIn('BACKUP="$backup"', command)
+        self.assertIn("Expected exactly one regular GitLab backup archive", command)
+        # Keep this equal to hooks.make_hook's restore default: an existing
+        # config aligned through `set --restore-cmd` must have the same full
+        # definition fingerprint as the builtin template.
+        self.assertEqual(restore[0]["timeout"], 7200)
+
+    def test_gitlab_restore_refuses_ambiguous_archives_before_docker(self):
+        command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = os.path.join(tmp, "gitlab", "data", "backups")
+            os.makedirs(backup_dir)
+            for backup_id in ("1_2026_01_01_18.0.0", "2_2026_01_02_18.0.0"):
+                with open(os.path.join(
+                        backup_dir, backup_id + "_gitlab_backup.tar"), "wb"):
+                    pass
+            result = subprocess.run(
+                ["sh", "-c", command], cwd=tmp, capture_output=True, text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Expected exactly one", result.stderr)
+        self.assertNotIn("docker:", result.stderr)
 
 
 class DetectTemplateTest(unittest.TestCase):
@@ -132,6 +174,55 @@ class OverrideDirTest(unittest.TestCase):
             json.dump(t, f)
         loaded = templates.load("gitlab")
         self.assertEqual(loaded["description"], "OPERATOR OVERRIDE")
+
+    def test_exact_builtin_loader_bypasses_operator_override(self):
+        os.makedirs(templates.override_dir(), exist_ok=True)
+        t = copy.deepcopy(_valid())
+        t["name"] = "gitlab"
+        t["description"] = "MALICIOUS OVERRIDE"
+        t["hooks"]["pre_backup"][0]["cmd"] = "PWN_SENTINEL"
+        with open(os.path.join(templates.override_dir(), "gitlab.json"), "w") as f:
+            import json
+            json.dump(t, f)
+
+        loaded = templates.load_exact("gitlab", "builtin")
+
+        self.assertNotEqual(loaded["description"], "MALICIOUS OVERRIDE")
+        self.assertNotIn("PWN_SENTINEL", str(loaded))
+
+    def test_provenance_records_operator_source(self):
+        os.makedirs(templates.override_dir(), exist_ok=True)
+        t = copy.deepcopy(_valid())
+        t["name"] = "gitlab"
+        with open(os.path.join(templates.override_dir(), "gitlab.json"), "w") as f:
+            import json
+            json.dump(t, f)
+
+        loaded, source = templates.load_with_source("gitlab")
+
+        self.assertEqual(source, "operator")
+        self.assertEqual(templates.provenance(loaded, source=source)["source"], "operator")
+
+    def test_exact_loader_rejects_unknown_source(self):
+        with self.assertRaises(util.CommandError):
+            templates.load_exact("gitlab", "backup-share")
+
+    def test_exact_operator_loader_rejects_symlink_and_writable_file(self):
+        os.makedirs(templates.override_dir(), exist_ok=True)
+        path = os.path.join(templates.override_dir(), "gitlab.json")
+        os.symlink(os.path.join(templates.builtin_dir(), "gitlab.json"), path)
+        with self.assertRaises(util.CommandError):
+            templates.load_exact("gitlab", "operator")
+        os.unlink(path)
+
+        t = copy.deepcopy(_valid())
+        t["name"] = "gitlab"
+        with open(path, "w") as f:
+            import json
+            json.dump(t, f)
+        os.chmod(path, 0o666)
+        with self.assertRaises(util.CommandError):
+            templates.load_exact("gitlab", "operator")
 
 
 if __name__ == "__main__":

@@ -108,14 +108,28 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--name", dest="bootstrap_name", default=None,
                    help="With --from-repo: set the stack name (default: from the manifest).")
     r.add_argument("--save-config", dest="save_config", action="store_true",
-                   help="With --from-repo: save the reconstructed config locally (default: ephemeral).")
+                   help="With --from-repo: after a successful restore, save a target-local "
+                        "config (requires --use-template-hooks; installs the key and leaves "
+                        "the timer disabled).")
     r.add_argument("--snapshot", default="latest", help="restic snapshot (default: latest).")
-    r.add_argument("--force", action="store_true", help="Overwrite a non-empty target.")
-    r.add_argument("--no-custom-restore", dest="no_custom_restore", action="store_true",
-                   help="Ignore the custom restore command, force the built-in DB import.")
-    r.add_argument("--restore-cmd", dest="restore_cmd", default=None,
-                   help="Provide a custom restore command (mainly for --from-repo, since the "
-                        "manifest carries no shell). Providing it = allowing it.")
+    r.add_argument("--force", action="store_true",
+                   help="Overwrite a non-empty target; never approves root hook commands.")
+    custom_restore = r.add_mutually_exclusive_group()
+    custom_restore.add_argument(
+        "--no-custom-restore", dest="no_custom_restore", action="store_true",
+        help="Explicitly ignore application hooks and use the built-in DB/file "
+             "restore path (required as one policy choice for v5 --from-repo).",
+    )
+    custom_restore.add_argument(
+        "--restore-cmd", dest="restore_cmd", default=None,
+        help="Provide a custom restore command (mainly for --from-repo, since the "
+             "manifest carries no shell). It is displayed and confirmed before execution.",
+    )
+    custom_restore.add_argument(
+        "--use-template-hooks", dest="use_template_hooks", action="store_true",
+        help="With --from-repo: reconstruct every hook from the exact locally installed "
+             "template bound by the manifest, show all commands, and ask for approval.",
+    )
     r.set_defaults(func=restore_cmd.cmd_restore)
 
     # --- run (called by systemd) ---

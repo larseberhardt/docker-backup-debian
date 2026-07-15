@@ -21,6 +21,7 @@ on the timer. There is no sandboxing (stdlib-only). Control = provenance
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -79,6 +80,32 @@ def compute_fingerprint(hooks: Dict[str, Any]) -> str:
             if cmd:
                 items.append("%s\x00%s" % (phase, cmd))
     return hashlib.sha256("\n".join(items).encode("utf-8")).hexdigest()
+
+
+def compute_definition_fingerprint(hooks: Dict[str, Any]) -> str:
+    """Portable hash of every execution-relevant hook attribute.
+
+    ``compute_fingerprint`` is the long-standing local approval format and must
+    remain stable for existing configs.  Cross-server template reconstruction
+    needs a stronger compatibility binding: a changed cwd, timeout or failure
+    policy must mismatch just like a changed command.  Cosmetic hook names are
+    deliberately omitted.
+    """
+    definitions = []  # type: List[Dict[str, Any]]
+    for phase in PHASES:
+        for h in phase_hooks({"hooks": hooks}, phase):
+            definitions.append({
+                "phase": phase,
+                "cmd": h["cmd"],
+                "cwd": h.get("cwd", "stack"),
+                "timeout": h.get("timeout") or _DEFAULT_TIMEOUT.get(phase, 3600),
+                "on_failure": h.get("on_failure") or _DEFAULT_ON_FAILURE.get(phase, "abort"),
+            })
+    payload = json.dumps(
+        definitions, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(b"docker-backup-hook-definition-v1\0" + payload).hexdigest()
+    return "sha256-v1:%s" % digest
 
 
 def approve(cfg: Dict[str, Any]) -> None:

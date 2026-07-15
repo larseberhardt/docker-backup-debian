@@ -40,7 +40,7 @@
   "hooks": {
     "pre_backup": [
       {
-        "cmd": "docker exec gitlab gitlab-backup create CRON=1",
+        "cmd": "rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1",
         "on_failure": "abort",
         "name": "gitlab-backup create"
       }
@@ -55,8 +55,9 @@
     ],
     "restore": [
       {
-        "cmd": "docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-ctl stop sidekiq && docker exec gitlab gitlab-backup restore FORCE=yes && docker exec gitlab gitlab-ctl start",
+        "cmd": "backup_dir=gitlab/data/backups; set -- \"$backup_dir\"/*_gitlab_backup.tar; if [ \"$#\" -ne 1 ] || [ ! -f \"$1\" ] || [ -L \"$1\" ]; then echo \"Expected exactly one regular GitLab backup archive in $backup_dir; found $#.\" >&2; exit 1; fi; archive=${1##*/}; backup=${archive%_gitlab_backup.tar}; case \"$backup\" in \"\"|*[!A-Za-z0-9_.-]*) echo \"Unsafe GitLab backup ID: $backup\" >&2; exit 1;; esac; attempt=0; until docker exec gitlab gitlab-rake gitlab:env:info >/dev/null 2>&1; do attempt=$((attempt + 1)); if [ \"$attempt\" -ge 60 ]; then echo \"GitLab did not become ready within 20 minutes.\" >&2; exit 1; fi; echo \"Waiting for GitLab initialization ($attempt/60)...\"; sleep 20; done && docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-ctl stop sidekiq && docker exec -e GITLAB_ASSUME_YES=1 gitlab gitlab-backup restore BACKUP=\"$backup\" && docker exec gitlab gitlab-ctl start",
         "on_failure": "abort",
+        "timeout": 7200,
         "name": "gitlab-backup restore"
       }
     ]

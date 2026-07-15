@@ -255,8 +255,9 @@ runs until you approve it**:
   pass **`--allow-hooks`** (or run `docker-backup set <name> --allow-hooks` after reviewing).
 - If hooks exist but aren't approved, the backup **fails hard** — it is never silently
   skipped (a quietly-skipped GitLab pre-dump would mean data loss).
-- On approval a **fingerprint** (SHA-256 of the command strings) is stored; if a command
-  changes afterwards, the next run **refuses to execute** until you re-approve.
+- On approval a **fingerprint** of the command strings is stored; if a command changes
+  afterwards, the next run **refuses to execute** until you re-approve. The separate
+  cross-server binding also covers phase/order, cwd, timeout and failure policy.
 - Backend credentials (S3/B2/SFTP keys) are **stripped** from the hook environment.
 - The cross-server **manifest never carries shell** (it's a plaintext file on the drive) —
   see the restore note below.
@@ -286,9 +287,9 @@ This produces a config with `db_autodetect=false`, the ~25 live-data excludes,
 
 | Phase    | Command                                                                 |
 |----------|-------------------------------------------------------------------------|
-| pre      | `docker exec gitlab gitlab-backup create CRON=1`                        |
+| pre      | remove stale generated archives, then `gitlab-backup create CRON=1`      |
 | post     | `rm -f gitlab/data/backups/*.tar` *(cwd = stack)*                       |
-| restore  | `gitlab-ctl stop puma && … gitlab-backup restore FORCE=yes && … start` |
+| restore  | `gitlab-ctl stop puma && … GITLAB_ASSUME_YES=1 … restore && … start`   |
 
 A backup run then: pre-hook creates the consistent dump → the DB loop is skipped →
 restic archives `/opt/gitlab` **with** the fresh `.tar` but **without** the live dirs →
@@ -297,6 +298,34 @@ the post-hook deletes the archived `.tar` (runs even if the backup failed).
 > The `.tar` that `gitlab-backup create` writes (under `gitlab/data/backups/`) is
 > deliberately **not** in the exclude list — it is the only consistent DB copy and must be
 > archived. The template ships a test asserting this.
+
+With GitLab's local filesystem storage, that application archive also contains repositories,
+uploads, artifacts, packages, LFS objects and local container-registry images. The matching
+live directories can therefore stay excluded from restic. GitLab does **not** put blobs or
+registry data held in external object storage into this archive; those buckets need their own
+provider-level backup. `docker-backup` captures the Compose stack separately; verify that the
+GitLab config volume (including `gitlab-secrets.json`) is either inside that stack or selected
+as an external bind.
+
+GitLab requires the target container to use the **exact same GitLab version and edition**
+as the archive. The restored Compose file should therefore pin the image version; GitLab
+itself aborts a mismatched restore. The hook requires exactly one regular
+`*_gitlab_backup.tar`, derives its validated ID, and passes it as `BACKUP=...`; a stale or
+ambiguous archive set therefore fails closed. It also sets `GITLAB_ASSUME_YES=1` explicitly
+so an unattended restore cannot wait at GitLab's destructive-action prompts. On a fresh
+server it first waits up to 20 minutes for `gitlab-rake gitlab:env:info` to succeed, printing
+a status line every 20 seconds; this prevents the restore from racing Omnibus first-boot
+reconfiguration and makes a real wait visible instead of looking frozen.
+
+Existing GitLab configs keep their previously stored hook. Before creating the first v5
+manifest, align an older config with the current builtin template and re-approve it:
+
+```bash
+sudo docker-backup set gitlab \
+  --pre-cmd 'rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1' \
+  --restore-cmd 'backup_dir=gitlab/data/backups; set -- "$backup_dir"/*_gitlab_backup.tar; if [ "$#" -ne 1 ] || [ ! -f "$1" ] || [ -L "$1" ]; then echo "Expected exactly one regular GitLab backup archive in $backup_dir; found $#." >&2; exit 1; fi; archive=${1##*/}; backup=${archive%_gitlab_backup.tar}; case "$backup" in ""|*[!A-Za-z0-9_.-]*) echo "Unsafe GitLab backup ID: $backup" >&2; exit 1;; esac; attempt=0; until docker exec gitlab gitlab-rake gitlab:env:info >/dev/null 2>&1; do attempt=$((attempt + 1)); if [ "$attempt" -ge 60 ]; then echo "GitLab did not become ready within 20 minutes." >&2; exit 1; fi; echo "Waiting for GitLab initialization ($attempt/60)..."; sleep 20; done && docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-ctl stop sidekiq && docker exec -e GITLAB_ASSUME_YES=1 gitlab gitlab-backup restore BACKUP="$backup" && docker exec gitlab gitlab-ctl start' \
+  --allow-hooks
+```
 
 ### Building configs by hand (without a template)
 
@@ -325,17 +354,37 @@ daily/weekly/monthly counts).
 
 For a stack with a restore hook, `docker-backup restore` brings the stack **up** first (a
 `docker exec` restore needs a running container — the built-in path leaves it stopped),
-shows the root commands, asks for confirmation (skip with `--force`), then runs them.
+shows the root commands, asks for default-no confirmation, then runs them. `--force` only
+allows a guarded clean replacement of a non-empty target; it never approves root commands.
 `--no-custom-restore` forces the built-in DB-import path instead.
 
-**Cross-server restore** (`--from-repo`): the manifest carries the excludes and the
-`db_autodetect` flag but **no shell**, so supply the restore command at restore time:
+**Cross-server restore** (`--from-repo`): the manifest is bound to one full restic snapshot
+ID and carries a shell-free template descriptor (name, schema version, local source and
+full hook-definition hash), but **no commands**. `--use-template-hooks` loads the exact
+locally installed template, verifies its hash, displays every command plus cwd, timeout and
+failure policy, and asks for confirmation before restic starts. Add `--save-config` to
+persist a complete target-local backup config only after the entire restore succeeds:
 
 ```bash
 sudo docker-backup restore /opt/gitlab --from-repo /mnt/backups/gitlab \
      --key-file ./gitlab.key \
-     --restore-cmd 'docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-backup restore FORCE=yes && docker exec gitlab gitlab-ctl start'
+     --use-template-hooks --save-config
 ```
+
+The supplied key is copied to `/etc/docker-backup/keys/gitlab.key` with mode `0600` (an
+existing different key is never overwritten). The saved schedule is installed, and any
+stale timer with that name is stopped and disabled until review:
+`systemctl enable --now docker-backup@gitlab.timer`. A legacy/unbound manifest, a different
+`--snapshot`, customized template-owned settings (hooks, excludes, schedule, retention or
+DB auto-detection), or a local template version/hash mismatch fails before restore; take
+one fresh backup with the updated tool or restore first and recreate the customized config
+manually. A restore-only CLI command cannot be combined with
+`--save-config`, because it cannot reconstruct the pre/post hooks required for future
+GitLab backups.
+
+The sidecar descriptor is plaintext and its hash is a **compatibility binding**, not a
+signature. It never causes automatic execution: commands come only from the exact local
+builtin/operator template and still require a visible, default-no confirmation.
 
 ### Contributing a template
 
@@ -447,18 +496,34 @@ Goal: after the restore, only `docker compose up -d` is needed. The DB dump is
 imported automatically; the stack then remains **stopped**.
 
 ```bash
+# 0) Stop the target stack first. Restore fails closed if any running container
+#    has a writable bind mount at, above, or below a restore target.
+cd /opt/xibo && docker compose down
+
 # 1) Restore (source is derived from the target's base name, here 'xibo-test'
 #    -> uses the config 'xibo-test'. Different source? --from xibo)
 sudo docker-backup restore /opt/xibo --from xibo
 
 # 2) What happens during this:
-#    - restic restore latest into a scratch folder
-#    - stack tree (compose + env files + bind data + dumps + volume tars) into the target
-#    - external bind paths (extra_backup_paths) back to their ORIGINAL location —
-#      only if missing there; an existing path is merged over only with --force
-#    - recreate named volumes and restore them from the tars
+#    - verify no running container has a writable bind overlapping the target
+#    - restic restore --sparse latest into a scratch folder on the target filesystem
+#      (sparse files keep their compact disk usage, and the restored tree can
+#      normally be moved into place without a second full copy)
+#    - authenticate the restored Compose model while it is still protected in scratch,
+#      stop/remove the exact Compose project, and verify target/external binds are quiet
+#    - selected external bind paths are mapped by Compose service + container target
+#      to the new server, displayed, and require a separate default-no confirmation;
+#      an existing target is clean-replaced only with --force
+#    - place the stack tree (compose + env files + bind data + dumps + volume tars)
+#      and selected external data as clean replacements under --force
+#    - recreate named volumes empty and restore them from the tars; an existing
+#      volume fails without --force, while --force deletes/recreates it only after
+#      proving no running or stopped container still references it; externally
+#      managed/shared Compose volumes require a manual restore
 #    - per DB: start only the DB service, wait for "ready", import the dump,
 #      then stop/remove the DB service again (data is preserved)
+#    - after all imports succeed, remove the temporary dumps and volume tars;
+#      failed restores retain them for diagnosis/manual retry
 
 # 3) Check env files (ports, hostnames, secrets) and start the stack:
 cd /opt/xibo
@@ -466,7 +531,8 @@ docker compose up -d
 ```
 
 Options: `--from <name>` (source config), `--snapshot <id>` (instead of `latest`),
-`--force` (overwrite a non-empty target).
+`--force` (overwrite a non-empty target and clean-replace existing non-external named
+volumes). `--force` does not approve hook commands or placement of external bind data.
 
 ### Restore on another server (test server, shared drive)
 
@@ -488,16 +554,26 @@ sudo docker-backup ls --on-repo /mnt/backups
 # --from-repo overrides the repo path, so it works even if the drive is
 # mounted elsewhere on B. Dry-run first to inspect the plan:
 sudo docker-backup --dry-run restore /opt/xibo-test \
-     --from-repo /mnt/backups/xibo --key-file /root/xibo.key
+     --from-repo /mnt/backups/xibo --key-file /root/xibo.key \
+     --no-custom-restore
 sudo docker-backup restore /opt/xibo-test \
-     --from-repo /mnt/backups/xibo --key-file /root/xibo.key --force
+     --from-repo /mnt/backups/xibo --key-file /root/xibo.key \
+     --no-custom-restore --force
 ```
 
 Notes: `--from-repo` is for **mounted local drives** (remote `s3:`/`sftp:` repos
-keep using `--from <name>`). DBs with `password_source: stored` keep their
-password only on server A — those imports warn and may need the password set
-manually; `env:`-based DBs (incl. Supabase) work as-is. The reconstructed config
-is ephemeral by default; add `--save-config` to persist it on server B.
+keep using `--from <name>`). DBs with `password_source: stored` keep their password only
+on server A: file restore is still possible, but `--save-config` refuses to create an
+incomplete unattended setup until that credential is moved to the Compose environment or
+configured locally. `env:`-based DBs (incl. Supabase) work as-is. The reconstructed config
+is ephemeral by default. Persisting it always requires
+`--use-template-hooks --save-config`; the exact local template is verified even when it has
+no hooks. Template reconstruction uses the full snapshot ID bound into the newest v5
+manifest, not a different/older `--snapshot`. The schedule drop-in is restored, the key is
+installed into the managed key directory, and the timer deliberately remains disabled.
+Every v5 cross-server restore requires one explicit policy choice: trusted local
+`--use-template-hooks`, a reviewed `--restore-cmd`, or `--no-custom-restore`. This prevents
+a modified plaintext sidecar from hiding that an application-specific restore was needed.
 
 ### Manual restore without the tool (emergency)
 

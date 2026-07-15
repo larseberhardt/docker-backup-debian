@@ -45,6 +45,17 @@ class ConfigRoundTripTest(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(config.config_path("xibo")).st_mode)
         self.assertEqual(mode, 0o640)
 
+    def test_save_new_never_replaces_existing_config(self):
+        original = self._sample()
+        config.save_new(original)
+        changed = self._sample()
+        changed["repo"] = "/mnt/other/xibo"
+
+        with self.assertRaises(FileExistsError):
+            config.save_new(changed)
+
+        self.assertEqual(config.load("xibo")["repo"], "/mnt/backups/xibo")
+
     def test_list_names(self):
         config.save(self._sample())
         other = self._sample()
@@ -83,6 +94,52 @@ class KeyTest(unittest.TestCase):
         self.assertTrue(len(val1) > 20)
         mode = stat.S_IMODE(os.stat(p1).st_mode)
         self.assertEqual(mode, 0o600)
+
+    def test_install_existing_key_copies_to_managed_path(self):
+        source = os.path.join(self.tmp, "restore.key")
+        with open(source, "w") as f:
+            f.write("existing-restic-key\n")
+
+        target = keys.install_existing_key("xibo", source)
+
+        self.assertEqual(target, keys.key_path("xibo"))
+        with open(target) as f:
+            self.assertEqual(f.read(), "existing-restic-key\n")
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
+
+    def test_install_existing_key_reuses_identical_and_rejects_difference(self):
+        first = os.path.join(self.tmp, "first.key")
+        second = os.path.join(self.tmp, "second.key")
+        with open(first, "w") as f:
+            f.write("same-key\n")
+        with open(second, "w") as f:
+            f.write("different-key\n")
+
+        target = keys.install_existing_key("xibo", first)
+        self.assertEqual(keys.install_existing_key("xibo", first), target)
+        with self.assertRaises(OSError):
+            keys.install_existing_key("xibo", second)
+
+    def test_install_existing_key_repairs_existing_managed_mode(self):
+        source = os.path.join(self.tmp, "restore.key")
+        with open(source, "w") as f:
+            f.write("same-key\n")
+        target = keys.install_existing_key("xibo", source)
+        os.chmod(target, 0o644)
+
+        keys.install_existing_key("xibo", source)
+
+        self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o600)
+
+    def test_install_existing_key_rejects_symlink_source(self):
+        actual = os.path.join(self.tmp, "actual.key")
+        link = os.path.join(self.tmp, "link.key")
+        with open(actual, "w") as f:
+            f.write("key\n")
+        os.symlink(actual, link)
+
+        with self.assertRaises(OSError):
+            keys.install_existing_key("xibo", link)
 
 
 if __name__ == "__main__":

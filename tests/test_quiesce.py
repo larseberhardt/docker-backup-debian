@@ -214,6 +214,14 @@ class RunFlowOrderingTest(unittest.TestCase):
             mock.patch.object(run_cmd, "manifest"),
             mock.patch.object(run_cmd, "quiesce"),
             mock.patch.object(run_cmd, "volumes"),
+            mock.patch.object(
+                run_cmd.compose, "config_json",
+                return_value={"name": "app", "services": {}, "volumes": {}},
+            ),
+            mock.patch.object(
+                run_cmd, "_verified_backup_named_volumes",
+                side_effect=lambda configured, _db, _cj: configured,
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -242,7 +250,7 @@ class RunFlowOrderingTest(unittest.TestCase):
         calls = []
         rc = self.run_cmd
         rc.quiesce.begin.side_effect = lambda cfg, cj: (calls.append("begin"), [{"s": 1}])[1]
-        rc.volumes.backup_named_volume.side_effect = lambda *a: calls.append("tar")
+        rc.volumes.backup_named_volume.side_effect = lambda *a, **k: calls.append("tar")
         rc.quiesce.release.side_effect = lambda cfg, locked, scope=None: calls.append(
             "release:%s" % scope)
         rc.restic.backup.side_effect = lambda *a, **k: calls.append("backup")

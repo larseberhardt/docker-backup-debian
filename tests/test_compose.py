@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from _support import load_fixture
 
-from docker_backup import compose, detect
+from docker_backup import compose, detect, util
 
 
 class ComposeVolumePlanTest(unittest.TestCase):
@@ -64,6 +67,147 @@ class ComposeVolumePlanTest(unittest.TestCase):
         self.assertEqual(argv[-2:], ["mysqldump", "--all-databases"])
         self.assertEqual(argv[argv.index("db") + 1], "mysqldump")
 
+    def test_config_json_can_replace_inherited_compose_environment(self):
+        env = {"PATH": "/usr/bin", "HOME": "/root"}
+        proc = SimpleNamespace(stdout="{}", stderr="", returncode=0)
+        with mock.patch.object(compose.util, "run", return_value=proc) as run:
+            self.assertEqual(
+                compose.config_json(
+                    "/opt/app/compose.yml", "/opt/app", "app",
+                    env=env, env_replace=True,
+                ),
+                {},
+            )
+        run.assert_called_once_with(
+            [
+                "docker", "compose", "-f", "/opt/app/compose.yml",
+                "--project-directory", "/opt/app", "-p", "app",
+                "config", "--format", "json",
+            ],
+            capture=True, env=env, env_replace=True,
+        )
+
+
+class ComposeCleanupTest(unittest.TestCase):
+    compose_file = "/opt/app/docker-compose.yml"
+    project_dir = "/opt/app"
+    project_name = "app-prod"
+
+    @staticmethod
+    def _proc(stdout=""):
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    def test_down_all_removes_orphans_then_verifies_no_project_containers(self):
+        with mock.patch.object(compose.util, "run") as run:
+            run.side_effect = [self._proc(), self._proc()]
+
+            compose.down_all(self.compose_file, self.project_dir, self.project_name)
+
+        base = [
+            "docker", "compose", "-f", self.compose_file,
+            "--project-directory", self.project_dir, "-p", self.project_name,
+        ]
+        self.assertEqual(run.call_args_list, [
+            mock.call(
+                base + ["down", "--remove-orphans"],
+                mutating=True, capture=False,
+            ),
+            mock.call(
+                base + ["ps", "--all", "--quiet"],
+                capture=True,
+            ),
+        ])
+
+    def test_down_all_fails_if_project_container_remains(self):
+        with mock.patch.object(compose.util, "run") as run:
+            run.side_effect = [self._proc(), self._proc("deadbeef\n")]
+
+            with self.assertRaises(util.CommandError):
+                compose.down_all(self.compose_file, self.project_dir, self.project_name)
+
+    def test_rm_service_force_stops_then_verifies_no_service_container(self):
+        with mock.patch.object(compose.util, "run") as run:
+            run.side_effect = [self._proc(), self._proc()]
+
+            compose.rm_service(
+                self.compose_file, self.project_dir, "db", self.project_name,
+            )
+
+        base = [
+            "docker", "compose", "-f", self.compose_file,
+            "--project-directory", self.project_dir, "-p", self.project_name,
+        ]
+        self.assertEqual(run.call_args_list, [
+            mock.call(
+                base + ["rm", "-f", "-s", "db"],
+                mutating=True, capture=False,
+            ),
+            mock.call(
+                base + ["ps", "--all", "--quiet", "db"],
+                capture=True,
+            ),
+        ])
+
+    def test_rm_service_fails_if_service_container_remains(self):
+        with mock.patch.object(compose.util, "run") as run:
+            run.side_effect = [self._proc(), self._proc("cafebabe\n")]
+
+            with self.assertRaises(util.CommandError):
+                compose.rm_service(
+                    self.compose_file, self.project_dir, "db", self.project_name,
+                )
+
+
+class ComposeRunningBindGuardTest(unittest.TestCase):
+    @staticmethod
+    def _proc(stdout=""):
+        return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+    def test_finds_writable_bind_ancestors_and_descendants(self):
+        inspected = [
+            {
+                "Id": "a" * 64,
+                "Name": "/parent-writer",
+                "Mounts": [
+                    {"Type": "bind", "Source": "/opt", "RW": True},
+                ],
+            },
+            {
+                "Id": "b" * 64,
+                "Name": "/child-writer",
+                "Mounts": [
+                    {"Type": "bind", "Source": "/opt/gitlab/data", "RW": True},
+                    {"Type": "bind", "Source": "/opt/gitlab/config", "RW": False},
+                    {"Type": "volume", "Source": "named", "RW": True},
+                ],
+            },
+        ]
+        with mock.patch.object(compose.util, "run") as run:
+            run.side_effect = [
+                self._proc("%s\n%s\n" % ("a" * 64, "b" * 64)),
+                self._proc(json.dumps(inspected)),
+            ]
+
+            found = compose.running_writable_bind_mounts_overlapping("/opt/gitlab")
+
+        self.assertEqual(found, [
+            {"container": "parent-writer", "source": "/opt"},
+            {"container": "child-writer", "source": "/opt/gitlab/data"},
+        ])
+
+    def test_no_running_containers_needs_no_inspect(self):
+        with mock.patch.object(
+                compose.util, "run", return_value=self._proc(""),
+        ) as run:
+            self.assertEqual(
+                compose.running_writable_bind_mounts_overlapping("/opt/gitlab"),
+                [],
+            )
+        run.assert_called_once_with(
+            ["docker", "container", "ls", "--quiet", "--no-trunc"],
+            capture=True,
+        )
+
 
 class Postgres18ParentLayoutTest(unittest.TestCase):
     """postgres:18+ mounts the PARENT /var/lib/postgresql (PGDATA in <parent>/18/docker).
@@ -112,4 +256,3 @@ class Postgres18ParentLayoutTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

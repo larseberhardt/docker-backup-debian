@@ -22,6 +22,33 @@ There is no sandboxing. The trust model is: **provenance** (in-repo, PR-reviewed
 **human approval** + **change-fingerprint**. Review every command in a template before
 approving it.
 
+## Trusted reconstruction on another server
+
+A v5 repository manifest is bound to one full restic snapshot ID and stores only an
+allowlisted template descriptor: template name, schema version, exact local source
+(`builtin` or `operator`), whether hooks are present, and a SHA-256 over the normalized
+execution fields (`phase`, command, cwd, timeout and failure policy). Raw hook commands are
+never copied into the plaintext sidecar.
+
+`restore --from-repo ... --use-template-hooks` loads only that exact local source (a
+builtin descriptor cannot be shadowed by `/etc`), compares the version and hash, displays
+every command and its execution policy, and asks for default-no approval independently of
+`--force`. Metadata alone never executes anything. `--save-config` requires this mode; all
+phases are saved and approved only after the full restore succeeds, target paths and
+selected external binds are recalculated, the supplied key is installed in the managed key
+directory, and the timer is explicitly stopped/disabled for review. Source overrides of
+template-owned excludes, schedule, retention or DB auto-detection are not silently lost:
+strict config saving refuses them and asks the operator to recreate/review the config
+manually after restoring.
+
+An `operator` template used for reconstruction must be a regular, root-owned file and
+must not be group/world-writable or a symlink.
+
+The sidecar is not signed, so its hash detects incompatible/customized hooks but is not
+an authenticity proof. The security boundary is that executable bytes come only from a
+locally installed template and are visibly confirmed. Legacy manifests and mismatches
+must use a reviewed `--restore-cmd` or be replaced by a fresh backup manifest.
+
 ## Schema (`template_schema_version: 1`)
 
 ```jsonc

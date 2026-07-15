@@ -180,7 +180,7 @@ class MysqlEventsFallbackTest(unittest.TestCase):
     def test_retries_without_events_on_scheduler_error(self):
         calls = []
 
-        def fake_run_to_file(argv, out_path, kind):
+        def fake_run_to_file(argv, out_path, kind, **kwargs):
             calls.append(argv)
             if "--events" in argv:
                 raise util.CommandError(
@@ -200,7 +200,7 @@ class MysqlEventsFallbackTest(unittest.TestCase):
         self.assertNotIn("--events", calls[1])
 
     def test_other_errors_are_not_retried(self):
-        def fake_run_to_file(argv, out_path, kind):
+        def fake_run_to_file(argv, out_path, kind, **kwargs):
             raise util.CommandError(argv, 1, "Access denied for user 'root'")
 
         db = {"service": "db", "auth_user": "root", "all_databases": True}

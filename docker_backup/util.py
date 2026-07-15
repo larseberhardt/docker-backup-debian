@@ -114,6 +114,7 @@ def run(
     stdout: Optional[IO] = None,
     stdin: Optional[IO] = None,
     cwd: Optional[str] = None,
+    pass_fds=(),
 ):
     """Runs a command.
 
@@ -157,6 +158,7 @@ def run(
             stdin=stdin,
             text=text,
             cwd=cwd,
+            pass_fds=tuple(pass_fds),
         )
     except FileNotFoundError as exc:
         raise CommandError(argv, 127, str(exc))

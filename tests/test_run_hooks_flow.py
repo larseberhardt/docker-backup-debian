@@ -48,6 +48,10 @@ class HookOrderingTest(unittest.TestCase):
             mock.patch.object(run_cmd, "restic"),
             mock.patch.object(run_cmd, "manifest"),
             mock.patch.object(run_cmd, "hooks"),
+            mock.patch.object(
+                run_cmd.compose, "config_json",
+                return_value={"name": "gitlab", "services": {}, "volumes": {}},
+            ),
         ]
         for p in self._patches:
             p.start()
@@ -75,7 +79,7 @@ class HookOrderingTest(unittest.TestCase):
         self.assertIn("pre_backup", phases)
         self.assertIn("post_backup", phases)  # finally ran despite the backup error
 
-    def test_pre_failure_skips_backup_and_post(self):
+    def test_pre_failure_skips_backup_but_runs_cleanup_post(self):
         def se(cfg, phase):
             if phase == "pre_backup":
                 raise util.CommandError(["pre"], 1, "fail")
@@ -84,7 +88,7 @@ class HookOrderingTest(unittest.TestCase):
             run_cmd._do_run(_cfg())
         self.assertFalse(run_cmd.restic.backup.called)
         phases = [c.args[1] for c in run_cmd.hooks.run_hooks.call_args_list]
-        self.assertNotIn("post_backup", phases)
+        self.assertIn("post_backup", phases)
 
 
 class HookGateInFlowTest(unittest.TestCase):
@@ -135,9 +139,13 @@ class DbSkipTest(unittest.TestCase):
         os.environ.pop("DOCKER_BACKUP_ETC", None)
         util.set_dry_run(False)
 
-    def test_no_db_services_skips_compose_config(self):
+    def test_no_db_services_still_checks_current_compose_model(self):
+        run_cmd.compose.config_json.return_value = {
+            "name": "gitlab", "services": {}, "volumes": {},
+        }
+        run_cmd.compose.collect_volume_backup_plan.return_value = ([], [])
         run_cmd._do_run(_cfg(db_services=[]))
-        self.assertFalse(run_cmd.compose.config_json.called)
+        self.assertTrue(run_cmd.compose.config_json.called)
 
 
 if __name__ == "__main__":

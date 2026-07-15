@@ -7,6 +7,7 @@ Passwords are passed into the exec environment via ``MYSQL_PWD`` / ``PGPASSWORD`
 from __future__ import annotations
 
 import os
+import stat
 import time
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,7 @@ def _probe_tool(
 def dump(
     db: Dict[str, Any], password: Optional[str],
     compose_file: str, project_dir: str, project_name: Optional[str], dumps_dir: str,
+    *, dumps_fd=None,
 ) -> None:
     """Writes one or more dump files to ``dumps_dir``.
 
@@ -43,10 +45,16 @@ def dump(
     per database (e.g. Supabase: ``db.postgres.sql`` + ``db._supabase.sql``).
     """
     if db["engine"] == "mysql":
-        out_path = os.path.join(dumps_dir, db["service"] + ".sql")
-        _dump_mysql(db, password, compose_file, project_dir, project_name, out_path)
+        out_path = _safe_dump_path(dumps_dir, db["service"] + ".sql")
+        _dump_mysql(
+            db, password, compose_file, project_dir, project_name, out_path,
+            dumps_fd=dumps_fd,
+        )
     elif db["engine"] == "postgres":
-        _dump_postgres(db, password, compose_file, project_dir, project_name, dumps_dir)
+        _dump_postgres(
+            db, password, compose_file, project_dir, project_name, dumps_dir,
+            dumps_fd=dumps_fd,
+        )
     else:
         raise util.CommandError(["dump"], 1, "Unknown engine: %s" % db["engine"])
 
@@ -80,7 +88,9 @@ def _is_event_scheduler_error(stderr) -> bool:
         "show events" in low and "1577" in low)
 
 
-def _dump_mysql(db, password, compose_file, project_dir, project_name, out_path) -> None:
+def _dump_mysql(
+    db, password, compose_file, project_dir, project_name, out_path, *, dumps_fd=None,
+) -> None:
     tool = _probe_tool(
         compose_file, project_dir, db["service"],
         ["mariadb-dump", "mysqldump"], project_name,
@@ -95,7 +105,7 @@ def _dump_mysql(db, password, compose_file, project_dir, project_name, out_path)
                               db.get("databases"), with_events)
         argv = compose.exec_args(compose_file, project_dir, db["service"], cmd,
                                  env=env, tty=False, project_name=project_name)
-        _run_to_file(argv, out_path, "mysql")
+        _run_to_file(argv, out_path, "mysql", parent_fd=dumps_fd)
 
     try:
         run(with_events=True)
@@ -123,11 +133,27 @@ def postgres_dump_targets(db, dumps_dir):
     """Plans the Postgres dump files: ``(globals_path|None, [(dbname, path), …])``."""
     service = db["service"]
     databases = db.get("databases") or [_MAINT_DB]
-    globals_path = (os.path.join(dumps_dir, globals_filename(service))
+    globals_path = (_safe_dump_path(dumps_dir, globals_filename(service))
                     if db.get("dump_globals") else None)
-    targets = [(name, os.path.join(dumps_dir, db_filename(service, name)))
+    targets = [(name, _safe_dump_path(dumps_dir, db_filename(service, name)))
                for name in databases]
     return globals_path, targets
+
+
+def _safe_dump_path(dumps_dir: str, filename: str) -> str:
+    """Keep manifest/config-derived dump names below the staging directory."""
+    if (not isinstance(filename, str) or not filename or "\0" in filename
+            or "/" in filename or "\\" in filename):
+        raise util.CommandError(["dump"], 1, "Unsafe dump filename: %r" % filename)
+    root = os.path.abspath(dumps_dir)
+    candidate = os.path.abspath(os.path.join(root, filename))
+    try:
+        contained = os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        contained = False
+    if not contained:
+        raise util.CommandError(["dump"], 1, "Dump path escapes staging: %r" % filename)
+    return candidate
 
 
 def build_pg_dump_cmd(user: str, dbname: str, preserve_ownership: bool) -> List[str]:
@@ -197,7 +223,9 @@ def _scan_import_errors(stderr: str) -> List[str]:
     return out
 
 
-def _dump_postgres(db, password, compose_file, project_dir, project_name, dumps_dir) -> None:
+def _dump_postgres(
+    db, password, compose_file, project_dir, project_name, dumps_dir, *, dumps_fd=None,
+) -> None:
     user = db["auth_user"]
     preserve = bool(db.get("dump_globals"))
     env = {}  # type: Dict[str, str]
@@ -209,13 +237,15 @@ def _dump_postgres(db, password, compose_file, project_dir, project_name, dumps_
         argv = compose.exec_args(compose_file, project_dir, db["service"],
                                  build_pg_dumpall_globals_cmd(user), env=env, tty=False,
                                  project_name=project_name)
-        _run_to_file(argv, globals_path, "postgres-globals")
+        _run_to_file(
+            argv, globals_path, "postgres-globals", parent_fd=dumps_fd,
+        )
         util.info("DB globals (roles/passwords): %s → %s" % (db["service"], globals_path))
     for dbname, path in targets:
         argv = compose.exec_args(compose_file, project_dir, db["service"],
                                  build_pg_dump_cmd(user, dbname, preserve), env=env, tty=False,
                                  project_name=project_name)
-        _run_to_file(argv, path, "postgres")
+        _run_to_file(argv, path, "postgres", parent_fd=dumps_fd)
         util.info("DB dump: %s/%s → %s" % (db["service"], dbname, path))
 
 
@@ -254,26 +284,36 @@ def _verify_dump_file(out_path: str, kind: str) -> None:
     wrong/empty database; report visibly but do not abort.
     """
     try:
-        size = os.path.getsize(out_path)
+        fd = os.open(out_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         raise util.CommandError(["dump"], 1, "Dump file missing: %s" % out_path)
-    if size == 0:
-        raise util.CommandError(["dump"], 1, "Dump file is empty (0 bytes): %s" % out_path)
+    try:
+        _verify_dump_fd(fd, out_path, kind)
+    finally:
+        os.close(fd)
 
-    with open(out_path, "rb") as fh:
-        head = fh.read(_DUMP_HEAD_BYTES)
-        if size > _DUMP_HEAD_BYTES:
-            fh.seek(-_DUMP_TAIL_BYTES, os.SEEK_END)
-            tail = fh.read()
-        else:
-            tail = head
+
+def _verify_dump_fd(fd: int, display_path: str, kind: str) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise util.CommandError(["dump"], 1, "Dump is not a regular file: %s" % display_path)
+    size = info.st_size
+    if size == 0:
+        raise util.CommandError(
+            ["dump"], 1, "Dump file is empty (0 bytes): %s" % display_path,
+        )
+    head = os.pread(fd, _DUMP_HEAD_BYTES, 0)
+    if size > _DUMP_HEAD_BYTES:
+        tail = os.pread(fd, _DUMP_TAIL_BYTES, max(0, size - _DUMP_TAIL_BYTES))
+    else:
+        tail = head
 
     marker = _DUMP_COMPLETE_MARKERS.get(kind)
     if marker and marker not in tail:
         raise util.CommandError(
             ["dump"], 1,
             "Dump '%s' looks truncated — completeness marker missing; NOT counted "
-            "as a success." % out_path,
+            "as a success." % display_path,
         )
 
     # Content warning only for SMALL dumps: a complete dump entirely WITHOUT a schema/data
@@ -284,23 +324,58 @@ def _verify_dump_file(out_path: str, kind: str) -> None:
     content = _DUMP_CONTENT_MARKERS.get(kind) or ()
     if content and size <= _DUMP_HEAD_BYTES and not any(m in head for m in content):
         util.warn("Dump '%s' contains no schema/data statement — is the correct "
-                  "database configured (e.g. POSTGRES_DB)?" % out_path)
+                  "database configured (e.g. POSTGRES_DB)?" % display_path)
 
 
-def _run_to_file(argv: List[str], out_path: str, kind: str) -> None:
+def _run_to_file(
+    argv: List[str], out_path: str, kind: str, *, parent_fd=None,
+) -> None:
     if util.DRY_RUN:
         util.info("DRY-RUN: " + util.fmt_argv(argv) + " > " + out_path)
         return
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    # 0600: the dump is the complete plaintext database — never world-readable
-    # (default umask would give 0644).
-    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    filename = os.path.basename(out_path)
+    if (not filename or filename in (".", "..") or "/" in filename
+            or "\\" in filename or "\0" in filename):
+        raise util.CommandError(["dump"], 1, "Unsafe dump filename: %r" % filename)
+    owned_parent_fd = -1
+    if parent_fd is None:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        owned_parent_fd = os.open(
+            os.path.dirname(out_path),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent_fd = owned_parent_fd
+    # Remove the old partial by name (unlink never follows it), then create a
+    # brand-new inode with O_EXCL. This makes MySQL's retry safe without ever
+    # truncating a symlink/hardlink planted in staging.
+    try:
+        os.unlink(filename, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    fd = os.open(
+        filename,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=parent_fd,
+    )
+    os.fchmod(fd, 0o600)
+    created_info = os.fstat(fd)
     # capture=True keeps the dump tool's stderr (stdout still goes to the file) so the
     # CommandError carries it — callers inspect it (e.g. the --events fallback in
     # _dump_mysql), and on failure we surface it explicitly since it no longer streams live.
     try:
-        with os.fdopen(fd, "wb") as fh:
+        with os.fdopen(fd, "wb", closefd=False) as fh:
             util.run(argv, stdout=fh, text=False, capture=True, mutating=False)
+            fh.flush()
+            os.fsync(fd)
+        _verify_dump_fd(fd, out_path, kind)
+        current = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        if ((current.st_dev, current.st_ino)
+                != (created_info.st_dev, created_info.st_ino)):
+            raise util.CommandError(
+                ["dump"], 1, "Dump path changed while writing: %s" % out_path,
+            )
     except util.CommandError as exc:
         stderr = exc.stderr
         if isinstance(stderr, bytes):
@@ -308,31 +383,96 @@ def _run_to_file(argv: List[str], out_path: str, kind: str) -> None:
         for line in (stderr or "").strip().splitlines():
             util.warn(line)
         raise
-    # rc=0 does NOT mean "complete": a truncated/empty dump must not end up in the snapshot
-    # as a success (the only previous safeguard was the exit code).
-    _verify_dump_file(out_path, kind)
+    finally:
+        os.close(fd)
+        if owned_parent_fd >= 0:
+            os.close(owned_parent_fd)
 
 
 # --- Import -----------------------------------------------------------------
 def import_dump(
     db: Dict[str, Any], password: Optional[str],
     compose_file: str, project_dir: str, project_name: Optional[str], dumps_dir: str,
+    *, dumps_fd=None,
 ) -> None:
     """Restores the files matching ``dump()`` from ``dumps_dir``."""
+    if dumps_fd is not None:
+        if not os.path.isdir("/proc/self/fd"):
+            raise util.CommandError(
+                ["import"], 1,
+                "Descriptor-backed database import requires Linux /proc.",
+            )
+        dumps_dir = "/proc/%d/fd/%d" % (os.getpid(), dumps_fd)
     if db["engine"] == "mysql":
         _import_mysql(db, password, compose_file, project_dir, project_name,
-                      os.path.join(dumps_dir, db["service"] + ".sql"))
+                      _safe_dump_path(dumps_dir, db["service"] + ".sql"))
     elif db["engine"] == "postgres":
         _import_postgres(db, password, compose_file, project_dir, project_name, dumps_dir)
     else:
         raise util.CommandError(["import"], 1, "Unknown engine: %s" % db["engine"])
 
 
+def _open_regular_dump(path: str):
+    """Open a dump through no-follow parent descriptors and verify its inode."""
+    parent_fd = fd = -1
+    try:
+        if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+            raise OSError("safe no-follow directory opens are unsupported")
+        absolute = os.path.abspath(path)
+        fd_prefix = "/proc/%d/fd/" % os.getpid()
+        if absolute.startswith(fd_prefix):
+            descriptor_and_path = absolute[len(fd_prefix):].split(os.path.sep)
+            try:
+                root_descriptor = int(descriptor_and_path[0])
+            except (ValueError, IndexError):
+                raise OSError("invalid descriptor-backed dump path")
+            parent_fd = os.dup(root_descriptor)
+            if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
+                raise OSError("dump root descriptor is not a directory")
+            parts = descriptor_and_path[1:]
+            if any(part in ("", ".", "..") for part in parts):
+                raise OSError("unsafe descriptor-backed dump path")
+        else:
+            parts = [part for part in absolute.split(os.path.sep) if part]
+        if not parts:
+            raise OSError("dump path has no filename")
+        flags = (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                 | getattr(os, "O_CLOEXEC", 0))
+        if parent_fd < 0:
+            parent_fd = os.open(os.path.sep, flags)
+        for part in parts[:-1]:
+            next_fd = os.open(part, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        filename = parts[-1]
+        before = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise OSError("dump is not a regular, non-symlink file")
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            current = os.fstat(fd)
+            if (not stat.S_ISREG(current.st_mode)
+                    or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)):
+                raise OSError("dump changed while it was opened")
+            os.close(parent_fd)
+            parent_fd = -1
+            return os.fdopen(fd, "rb")
+        except Exception:
+            os.close(fd)
+            fd = -1
+            raise
+    except OSError as exc:
+        raise util.CommandError(["import", path], 1, "Unsafe dump file: %s" % exc)
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def _import_file(argv: List[str], dump_path: str) -> None:
     if util.DRY_RUN:
         util.info("DRY-RUN: " + util.fmt_argv(argv) + " < " + dump_path)
         return
-    with open(dump_path, "rb") as fh:
+    with _open_regular_dump(dump_path) as fh:
         util.run(argv, stdin=fh, text=False, capture=False, mutating=False)
 
 
@@ -346,7 +486,7 @@ def _import_globals(argv: List[str], globals_path: str) -> None:
     if util.DRY_RUN:
         util.info("DRY-RUN: " + util.fmt_argv(argv) + " < " + globals_path)
         return
-    with open(globals_path, "rb") as fh:
+    with _open_regular_dump(globals_path) as fh:
         proc = util.run(argv, stdin=fh, text=True, capture=True, check=False, mutating=False)
     problems = _scan_import_errors(getattr(proc, "stderr", "") or "")
     if problems:
@@ -368,7 +508,7 @@ def _import_file_lenient(argv: List[str], dump_path: str) -> List[str]:
     if util.DRY_RUN:
         util.info("DRY-RUN: " + util.fmt_argv(argv) + " < " + dump_path)
         return []
-    with open(dump_path, "rb") as fh:
+    with _open_regular_dump(dump_path) as fh:
         proc = util.run(argv, stdin=fh, text=True, capture=True, check=False, mutating=False)
     return _scan_import_errors(getattr(proc, "stderr", "") or "")
 
@@ -515,7 +655,7 @@ def _import_postgres(db, password, compose_file, project_dir, project_name, dump
 
 
 def _import_legacy_single(db, user, env, compose_file, project_dir, project_name, dumps_dir) -> None:
-    legacy = os.path.join(dumps_dir, db["service"] + ".sql")
+    legacy = _safe_dump_path(dumps_dir, db["service"] + ".sql")
     if not os.path.exists(legacy):
         util.warn("No Postgres dumps found for '%s'." % db["service"])
         return

@@ -34,6 +34,14 @@ class OnCalendarTest(unittest.TestCase):
         self.assertIn("OnCalendar=\nOnCalendar=*-*-* 03:00:00\n", out)
         self.assertIn("RandomizedDelaySec=120", out)
 
+    def test_render_dropin_rejects_directive_injection(self):
+        with self.assertRaises(ValueError):
+            su.render_dropin("*-*-* 03:00:00\nUnit=pwn.service")
+
+    def test_render_dropin_rejects_invalid_delay(self):
+        with self.assertRaises(ValueError):
+            su.render_dropin("*-*-* 03:00:00", randomized_delay_sec=999999)
+
     def test_write_dropin(self):
         import os
         import tempfile

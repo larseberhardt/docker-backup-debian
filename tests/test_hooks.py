@@ -61,6 +61,41 @@ class FingerprintTest(unittest.TestCase):
         self.assertEqual(cfg["hooks_fingerprint"],
                          hooks.compute_fingerprint(cfg["hooks"]))
 
+    def test_definition_fingerprint_covers_execution_attributes(self):
+        base = {
+            "pre_backup": [hooks.make_hook(
+                "echo hi", phase="pre_backup", cwd="stack", timeout=10,
+                on_failure="abort",
+            )],
+            "post_backup": [],
+            "restore": [],
+        }
+        original = hooks.compute_definition_fingerprint(base)
+        self.assertTrue(original.startswith("sha256-v1:"))
+        for field, value in (
+            ("cmd", "echo changed"),
+            ("cwd", "/tmp"),
+            ("timeout", 11),
+            ("on_failure", "warn"),
+        ):
+            changed = {phase: [dict(h) for h in items] for phase, items in base.items()}
+            changed["pre_backup"][0][field] = value
+            self.assertNotEqual(
+                hooks.compute_definition_fingerprint(changed), original, field
+            )
+
+    def test_definition_fingerprint_is_stable_across_dict_key_order(self):
+        a = {"pre_backup": [{"cmd": "x", "cwd": "stack", "timeout": 5,
+                              "on_failure": "abort"}],
+             "post_backup": [], "restore": []}
+        b = {"restore": [], "post_backup": [],
+             "pre_backup": [{"on_failure": "abort", "timeout": 5,
+                              "cwd": "stack", "cmd": "x"}]}
+        self.assertEqual(
+            hooks.compute_definition_fingerprint(a),
+            hooks.compute_definition_fingerprint(b),
+        )
+
     def test_revoke_clears(self):
         cfg = {"hooks": {"pre_backup": [{"cmd": "x"}]}, "hooks_allowed": True,
                "hooks_fingerprint": "abc"}

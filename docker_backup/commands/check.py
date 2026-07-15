@@ -100,8 +100,9 @@ def _check_repos(cfg, key: str, subset: Optional[str]) -> List[str]:
             if not restic.check(repo, key, read_data_subset=subset):
                 problems.append("%s: restic check reported errors" % label)
         except util.CommandError as exc:
-            # Password/cache/backend failures are not proof that a repository is
-            # absent. Continue with the other repositories and report this one.
+            # A password/cache/backend failure is not proof that the repository
+            # is absent. Keep checking the other repositories, while recording
+            # this one as an access/setup error rather than an integrity failure.
             problems.append(
                 "%s repo not reachable (restic rc=%s)" % (label, exc.returncode)
             )

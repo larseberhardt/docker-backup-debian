@@ -37,6 +37,8 @@ class ResticVersionTest(unittest.TestCase):
             self.assertIsNone(restic.restic_version())
 
     def test_version_gates_are_ordered(self):
+        # 0.17 adds the dedicated missing-repository exit code; it also includes
+        # restore --sparse (introduced in 0.15).
         self.assertGreaterEqual(restic.MIN_VERSION, (0, 17, 0))
         self.assertGreaterEqual(restic.RECOMMENDED_VERSION, (0, 19, 1))
         self.assertLess(restic.MIN_VERSION, restic.RECOMMENDED_VERSION)

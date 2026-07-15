@@ -28,7 +28,7 @@ class RepositoryProbeTest(unittest.TestCase):
             ["restic"],
             1,
             "Fatal: unable to open config file: Stat: stat /repo/config: "
-            "no such file or directory",
+            "no such file or directory\nIs there a repository at the following location?",
         )
         with mock.patch.object(restic.util, "run", side_effect=error):
             with self.assertRaises(util.CommandError) as caught:
@@ -39,8 +39,16 @@ class RepositoryProbeTest(unittest.TestCase):
         error = util.CommandError(
             ["restic"],
             1,
-            "unable to open cache: neither $XDG_CACHE_HOME nor $HOME are defined",
+            "unable to open cache: unable to locate cache directory: "
+            "neither $XDG_CACHE_HOME nor $HOME are defined",
         )
+        with mock.patch.object(restic.util, "run", side_effect=error):
+            with self.assertRaises(util.CommandError) as caught:
+                restic.repo_initialized("/repo", "/key")
+        self.assertIs(caught.exception, error)
+
+    def test_wrong_password_is_not_treated_as_missing_repository(self):
+        error = util.CommandError(["restic"], 12, "wrong password or no key found")
         with mock.patch.object(restic.util, "run", side_effect=error):
             with self.assertRaises(util.CommandError) as caught:
                 restic.repo_initialized("/repo", "/key")

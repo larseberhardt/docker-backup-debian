@@ -51,8 +51,8 @@ def _warn_restic_version() -> None:
     if v < restic.MIN_VERSION:
         util.warn("restic %s is too old: safe repository detection and sparse "
                   "restores need >= %s. Older exit codes cannot safely drive "
-                  "automatic repository initialization. Please upgrade "
-                  "(https://restic.net)."
+                  "automatic repository initialization. "
+                  "Please upgrade (https://restic.net)."
                   % (ver, ".".join(str(x) for x in restic.MIN_VERSION)))
     elif v < restic.RECOMMENDED_VERSION:
         util.warn("restic %s works; >= %s is recommended for current restore, "

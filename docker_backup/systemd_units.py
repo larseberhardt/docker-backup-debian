@@ -85,6 +85,17 @@ def oncalendar_from(freq: str) -> str:
 
 
 def render_dropin(oncalendar: str, randomized_delay_sec: int = 300) -> str:
+    # This value is written into a root-owned systemd unit.  Keep validation at
+    # the final sink as well as at CLI/manifest boundaries: an embedded newline
+    # would otherwise create arbitrary additional unit directives.
+    if (not isinstance(oncalendar, str) or not oncalendar.strip()
+            or len(oncalendar) > 512
+            or any(c in oncalendar for c in ("\r", "\n", "\0"))):
+        raise ValueError("Unsafe OnCalendar value: %r" % oncalendar)
+    if (not isinstance(randomized_delay_sec, int)
+            or isinstance(randomized_delay_sec, bool)
+            or not 0 <= randomized_delay_sec <= 86400):
+        raise ValueError("RandomizedDelaySec must be an integer between 0 and 86400")
     # The first (empty) line clears any inherited value, then the real one.
     return (
         "[Timer]\n"
@@ -112,7 +123,7 @@ def validate_oncalendar(expr: str) -> bool:
 
 
 def daemon_reload() -> None:
-    util.run(["systemctl", "daemon-reload"], capture=False, mutating=True, check=False)
+    util.run(["systemctl", "daemon-reload"], capture=False, mutating=True, check=True)
 
 
 def enable_timer(name: str) -> None:
@@ -122,12 +133,21 @@ def enable_timer(name: str) -> None:
 
 def disable_timer(name: str) -> None:
     util.run(["systemctl", "disable", "--now", "docker-backup@%s.timer" % name],
-             capture=False, mutating=True, check=False)
+             capture=False, mutating=True, check=True)
 
 
 def timer_active(name: str) -> Optional[str]:
     try:
         proc = util.run(["systemctl", "is-active", "docker-backup@%s.timer" % name],
+                        capture=True, check=False)
+        return (proc.stdout or "").strip() or None
+    except util.CommandError:
+        return None
+
+
+def timer_enabled(name: str) -> Optional[str]:
+    try:
+        proc = util.run(["systemctl", "is-enabled", "docker-backup@%s.timer" % name],
                         capture=True, check=False)
         return (proc.stdout or "").strip() or None
     except util.CommandError:

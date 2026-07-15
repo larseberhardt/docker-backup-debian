@@ -64,6 +64,64 @@ class PgDumpTargetsTest(unittest.TestCase):
         self.assertEqual(dbdump.globals_filename("db"), "db.globals.sql")
         self.assertEqual(dbdump.db_filename("db", "_supabase"), "db._supabase.sql")
 
+    def test_database_name_cannot_escape_dump_directory(self):
+        db = {"service": "db", "databases": ["../../tmp/payload"]}
+        with self.assertRaises(util.CommandError):
+            dbdump.postgres_dump_targets(db, "/stage/dumps")
+
+    def test_dump_open_does_not_follow_racing_parent_symlink(self):
+        root = os.path.realpath(tempfile.mkdtemp())
+        try:
+            dumps = os.path.join(root, "dumps")
+            parked = os.path.join(root, "dumps-before-race")
+            outside = os.path.join(root, "outside")
+            os.makedirs(dumps)
+            os.makedirs(outside)
+            dump_path = os.path.join(dumps, "db.sql")
+            with open(dump_path, "wb") as fh:
+                fh.write(b"trusted dump")
+            with open(os.path.join(outside, "db.sql"), "wb") as fh:
+                fh.write(b"attacker dump")
+            real_open = os.open
+            fired = {"value": False}
+
+            def racing_open(path, flags, *args, **kwargs):
+                if path == "db.sql" and not fired["value"]:
+                    fired["value"] = True
+                    os.rename(dumps, parked)
+                    os.symlink(outside, dumps)
+                return real_open(path, flags, *args, **kwargs)
+
+            with mock.patch.object(dbdump.os, "open", side_effect=racing_open):
+                with dbdump._open_regular_dump(dump_path) as fh:
+                    self.assertEqual(fh.read(), b"trusted dump")
+            self.assertTrue(fired["value"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_dump_open_can_stay_on_retained_staging_descriptor(self):
+        root = os.path.realpath(tempfile.mkdtemp())
+        staging_fd = -1
+        try:
+            staging = os.path.join(root, "dumps")
+            parked = os.path.join(root, "dumps-original")
+            os.makedirs(staging)
+            with open(os.path.join(staging, "db.sql"), "wb") as fh:
+                fh.write(b"trusted dump")
+            staging_fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
+            os.rename(staging, parked)
+            os.makedirs(staging)
+            with open(os.path.join(staging, "db.sql"), "wb") as fh:
+                fh.write(b"replacement dump")
+            descriptor_path = "/proc/%d/fd/%d/db.sql" % (os.getpid(), staging_fd)
+
+            with dbdump._open_regular_dump(descriptor_path) as fh:
+                self.assertEqual(fh.read(), b"trusted dump")
+        finally:
+            if staging_fd >= 0:
+                os.close(staging_fd)
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class PgImportCmdTest(unittest.TestCase):
     def test_import_is_atomic_and_strict(self):
@@ -159,7 +217,7 @@ class TwoPassImportTest(unittest.TestCase):
 
     def setUp(self):
         util.set_dry_run(False)
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.dump = os.path.join(self.tmp, "db.appdb.sql")
         with open(self.dump, "w") as f:
             f.write("SELECT 1;\n")
@@ -299,7 +357,7 @@ class ImportPostgresFlowTest(unittest.TestCase):
 
     def setUp(self):
         util.set_dry_run(False)
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.common = ("/c/docker-compose.yml", "/c", "proj")
 
     def tearDown(self):
