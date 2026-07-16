@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -623,8 +624,10 @@ class RestoreDiskUsageTest(unittest.TestCase):
         }
         seen = []
 
-        def fail_restore(_repo, _key, _snapshot, scratch, paths=None, target_fd=None):
+        def fail_restore(_repo, _key, _snapshot, scratch, paths=None, **kwargs):
+            self.assertNotIn("target_fd", kwargs)
             seen.append(scratch)
+            self.assertEqual(stat.S_IMODE(os.stat(scratch).st_mode), 0o700)
             with open(os.path.join(scratch, "partial-restore"), "wb") as f:
                 f.write(b"partial data")
             raise RuntimeError("restore interrupted")

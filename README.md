@@ -555,9 +555,11 @@ sudo docker-backup restore /opt/xibo --from xibo
 
 # 2) What happens during this:
 #    - verify no running container has a writable bind overlapping the target
-#    - restic restore --sparse latest into a scratch folder on the target filesystem
+#    - restic restore --sparse latest into a random, root-only scratch folder on
+#      the target filesystem
 #      (sparse files keep their compact disk usage, and the restored tree can
-#      normally be moved into place without a second full copy)
+#      normally be moved into place without a second full copy; use a restore
+#      target below a root-controlled path such as /opt)
 #    - authenticate the restored Compose model while it is still protected in scratch,
 #      stop/remove the exact Compose project, and verify target/external binds are quiet
 #    - selected external bind paths are mapped by Compose service + container target

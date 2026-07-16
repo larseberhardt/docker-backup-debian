@@ -7,7 +7,6 @@ and never interactively.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -308,22 +307,11 @@ def forget_prune(repo, key_file, retention, tags) -> None:
     util.run(build_forget(repo, key_file, retention, tags), capture=False, mutating=True)
 
 
-def restore(repo, key_file, snapshot, target, paths=None, target_fd=None) -> None:
+def restore(repo, key_file, snapshot, target, paths=None) -> None:
     util.info("restic restore %s → %s" % (snapshot, target))
-    pass_fds = ()
-    command_target = target
-    if target_fd is not None:
-        proc_fd_root = "/proc/self/fd"
-        if not os.path.isdir(proc_fd_root):
-            raise util.CommandError(
-                ["restic", "restore"], 1,
-                "Safe descriptor-backed restore requires Linux /proc/self/fd.",
-            )
-        command_target = os.path.join(proc_fd_root, str(target_fd))
-        pass_fds = (target_fd,)
     util.run(
-        build_restore(repo, key_file, snapshot, command_target, paths),
-        capture=False, mutating=True, pass_fds=pass_fds,
+        build_restore(repo, key_file, snapshot, target, paths),
+        capture=False, mutating=True,
     )
 
 

@@ -47,17 +47,17 @@ class ResticBuilderTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--target") + 1], "/scratch")
         self.assertEqual(argv[argv.index("--path") + 1], "/opt/nextcloud")
 
-    def test_restore_can_anchor_target_to_inherited_directory_fd(self):
-        with mock.patch.object(restic.os.path, "isdir", return_value=True), \
-                mock.patch.object(restic.util, "run") as run:
+    def test_restore_uses_selected_scratch_path_directly(self):
+        with mock.patch.object(restic.util, "run") as run:
             restic.restore(
-                "/repo", "/k.key", "snapshot", "/display/scratch",
-                paths=["/opt/gitlab"], target_fd=17,
+                "/repo", "/k.key", "snapshot", "/root-only/scratch",
+                paths=["/opt/gitlab"],
             )
 
         argv = run.call_args.args[0]
-        self.assertEqual(argv[argv.index("--target") + 1], "/proc/self/fd/17")
-        self.assertEqual(run.call_args.kwargs["pass_fds"], (17,))
+        self.assertEqual(argv[argv.index("--target") + 1], "/root-only/scratch")
+        self.assertNotIn("cwd", run.call_args.kwargs)
+        self.assertNotIn("pass_fds", run.call_args.kwargs)
 
     def test_latest_snapshot_filter_requires_all_stack_tags(self):
         argv = restic.build_snapshots(

@@ -1565,12 +1565,15 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
     source_operation_dest = ""
     named_volume_plan = None  # type: Optional[list]
     try:
-        restore_kwargs = {"paths": restore_paths}
-        if scratch_ref.fd >= 0:
-            restore_kwargs["target_fd"] = scratch_ref.fd
+        # restic requires an ordinary directory target. Passing the retained
+        # directory through /proc/self/fd exposes a magic symlink as the restore
+        # root; restic then tries to remove that root as a stale item and fails
+        # after restoring all data. The scratch pathname is random, mode 0700,
+        # lives under the already-reserved target, and remains open by FD for all
+        # authenticated traversal and placement after restic returns.
         restic.restore(
             cfg["repo"], cfg["key_file"], snapshot, scratch,
-            **restore_kwargs,
+            paths=restore_paths,
         )
         src = _locate_restored(scratch, cfg["stack_path"]) if util.DRY_RUN else None
         source_info = (None if util.DRY_RUN else
@@ -2862,9 +2865,10 @@ def _make_restore_scratch(
     An existing destination can itself be a mountpoint, so its parent is not
     necessarily on the same device. In that case create scratch inside the target;
     for a missing target use its parent so the whole restored tree can be renamed.
-    The directory and its parent remain open: restic receives the directory FD and
-    cleanup uses unlinkat-style operations, so a later path swap cannot redirect
-    privileged writes or deletion.
+    The directory and its parent remain open. For compatibility restic receives
+    the ordinary root-only pathname; all subsequent authentication, placement,
+    and cleanup use retained directory descriptors. Restore targets therefore
+    need to live below a root-controlled path (the normal /opt layout).
     """
     prefix = ".docker-backup-restore.%s." % name
     if util.DRY_RUN:
