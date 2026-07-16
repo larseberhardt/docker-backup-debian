@@ -886,21 +886,31 @@ def _write_runtime_compose(
     external_fds: list, project_name: str, *, dest_fd: Optional[int] = None,
     trusted_file_fds: Optional[list] = None,
 ):
-    """Create an anonymous restore model whose bind sources are held descriptors.
+    """Create an anonymous, normalized restore model for Docker Compose.
 
-    Containers created during application/DB restore must not resolve mutable host
-    pathnames after validation. The Compose model itself stays on a retained memfd,
-    so it cannot be replaced by a concurrent rename. Containers are removed before
-    any of these descriptors close.
+    The Compose model itself stays on a retained memfd, so it cannot be replaced
+    by a concurrent rename. Bind/config/secret sources use ordinary canonical
+    paths because Docker/runc rejects ``/proc/<pid>/fd`` magic links as mount
+    sources. Their validated descriptors remain open for identity and digest
+    checks until all restore-time containers have been removed. Restore targets
+    must therefore be below a root-controlled path.
     """
     if not hasattr(os, "memfd_create"):
         raise RuntimeError(
             "Safe restore requires Linux memfd_create for the transient Compose model."
         )
+    if dest_fd is not None:
+        if operation_dest != canonical_dest:
+            raise ValueError(
+                "Runtime Compose project directory must use the canonical host path."
+            )
+        _assert_path_matches_fd(canonical_dest, dest_fd)
+    for target, target_fd in external_fds:
+        _assert_path_matches_fd(target, target_fd)
     model = copy.deepcopy(compose_model)
     model["name"] = project_name
     roots = [(canonical_dest, operation_dest, dest_fd)] + [
-        (target, _fd_host_path(fd), fd) for target, fd in external_fds
+        (target, target, fd) for target, fd in external_fds
     ]
     roots.sort(key=lambda item: len(item[0]), reverse=True)
     retained_sources = []
@@ -959,7 +969,7 @@ def _write_runtime_compose(
                         raise ValueError(
                             "Runtime Compose source has the wrong type: %s" % value
                         )
-                return _fd_host_path(source_fd)
+                return stable.rstrip("/") + "/" + relative
         return value
 
     try:
@@ -978,6 +988,7 @@ def _write_runtime_compose(
                     if not isinstance(bind_options, dict):
                         raise ValueError("Normalized Compose bind options are invalid.")
                     original_source = volume.get("source")
+                    selected_source = selected_target_path(original_source)
                     volume["source"] = stable_source(
                         original_source,
                         # Canonical Compose JSON represents short syntax with an
@@ -987,7 +998,7 @@ def _write_runtime_compose(
                             bind_options.get("create_host_path", True) is not False
                         ),
                     )
-                    if (volume["source"] == original_source
+                    if (selected_source is None
                             and not compose.is_system_bind_source(original_source)):
                         raise ValueError(
                             "Unselected external bind source cannot be used by an "
@@ -1042,7 +1053,7 @@ def _write_runtime_compose(
                     original = item.get("file")
                     trusted = trusted_files.get(original)
                     if trusted is not None:
-                        trusted_fd, expected_digest = trusted
+                        _trusted_fd, expected_digest = trusted
                         placed_path = stable_source(original, expected="file")
                         placed_fd = opened_sources.get(original)
                         if (placed_fd is None or not hmac.compare_digest(
@@ -1051,7 +1062,10 @@ def _write_runtime_compose(
                                 "Placed Compose %s file changed before use: %s"
                                 % (section_name[:-1], original)
                             )
-                        item["file"] = _fd_host_path(trusted_fd)
+                        # The sealed scratch copy remains the authentication
+                        # reference; Docker must receive the ordinary placed
+                        # pathname as its mount source.
+                        item["file"] = placed_path
                     elif dest_fd is not None and selected_target_path(original) is not None:
                         raise ValueError(
                             "Compose %s file was not bound from protected scratch: %s"
@@ -1081,6 +1095,12 @@ def _write_runtime_compose(
         os.fchmod(fd, 0o400)
         os.lseek(fd, 0, os.SEEK_SET)
         _seal_memfd(fd)
+        if dest_fd is not None:
+            _assert_path_matches_fd(canonical_dest, dest_fd)
+        for target, target_fd in external_fds:
+            _assert_path_matches_fd(target, target_fd)
+        for target, source_fd in retained_sources:
+            _assert_path_matches_fd(target, source_fd)
     except Exception:
         if fd >= 0:
             os.close(fd)
@@ -1689,7 +1709,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                     "restore project before placing data…"
                 )
                 compose.down_all(
-                    cleanup_compose, source_operation_dest, project_hint,
+                    cleanup_compose, dest, project_hint,
                 )
             finally:
                 if cleanup_compose_fd >= 0:
@@ -1749,7 +1769,10 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             main_tree_placed = True
             os.close(initial_dest_fd)
             initial_dest_fd = -1
-            operation_dest = _fd_host_path(placed_dest_fd)
+            # Docker/runc cannot use /proc/<pid>/fd magic links as bind-mount
+            # sources. Keep the retained descriptor for verification, but pass
+            # the ordinary, root-controlled target path to Docker Compose.
+            operation_dest = dest
             restored_compose_fd = _open_regular_at(placed_dest_fd, compose_name)
             if not hmac.compare_digest(
                     compose_digest or "", _fd_sha256(restored_compose_fd)):
@@ -1983,10 +2006,9 @@ def _custom_restore(
         compose.up_all(new_compose, dest, new_project)
         hooks.run_hooks(hook_cfg, "restore")
     finally:
-        # Restore-time Compose uses a descriptor-backed project directory so a
-        # concurrent path replacement cannot redirect host binds. Never leave
-        # containers with that process-lifetime /proc path in HostConfig: remove
-        # them before closing the descriptor; data and named volumes are retained.
+        # Runtime sources were verified through retained descriptors before
+        # startup. Remove every restore-time container before releasing those
+        # verification handles; data and named volumes are retained.
         compose.down_all(new_compose, dest, new_project)
     util.info("Custom restore command to %s complete." % (display_dest or dest))
     return True
@@ -2665,9 +2687,8 @@ def _import_databases(
             util.info("Starting DB service '%s' for the import…" % db["service"])
             try:
                 # Do not start `depends_on` services: only the isolated database is
-                # needed, and every container using transient FD-backed binds must
-                # be removed before those descriptors close. Keep startup under the
-                # cleanup guard because Compose may partially create before failing.
+                # needed. Keep startup under the cleanup guard because Compose may
+                # partially create a container before returning a failure.
                 compose.up_service(
                     new_compose, dest, db["service"], new_project, no_deps=True,
                 )

@@ -120,6 +120,87 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             for backing in anonymous_files:
                 backing.close()
 
+    def test_snipe_db_bind_uses_normal_host_path_and_project_directory(self):
+        target = os.path.join(self.tmp, "snipeit-drill")
+        db_path = os.path.join(target, "db")
+        os.makedirs(db_path)
+        dest_fd = os.open(target, os.O_RDONLY)
+        anonymous_files = []
+
+        def fake_memfd_create(_name, _flags=0):
+            backing = tempfile.TemporaryFile()
+            anonymous_files.append(backing)
+            return os.dup(backing.fileno())
+
+        model = {
+            "services": {
+                "snipeit-mysql": {
+                    "image": "mysql:5",
+                    "volumes": [{
+                        "type": "bind",
+                        "source": db_path,
+                        "target": "/var/lib/mysql",
+                        "bind": {"create_host_path": True},
+                    }],
+                },
+            },
+        }
+        runtime_fd = -1
+        retained = []
+        try:
+            with mock.patch.object(
+                    restore_cmd.os, "memfd_create", create=True,
+                    side_effect=fake_memfd_create,
+            ), mock.patch.object(
+                    restore_cmd, "_fd_host_path",
+                    side_effect=lambda fd: "/proc/4242/fd/%d" % fd,
+            ):
+                runtime_fd, runtime_path, retained = (
+                    restore_cmd._write_runtime_compose(
+                        model, target, target, [], "snipeit-drill",
+                        dest_fd=dest_fd,
+                    )
+                )
+
+            os.lseek(runtime_fd, 0, os.SEEK_SET)
+            rendered = json.loads(os.read(runtime_fd, 1024 * 1024))
+            source = rendered["services"]["snipeit-mysql"]["volumes"][0]["source"]
+            self.assertEqual(source, db_path)
+            self.assertFalse(source.startswith("/proc/"))
+            self.assertIn(db_path, dict(retained))
+
+            argv = restore_cmd.compose._base(
+                runtime_path, target, "snipeit-drill",
+            ) + ["up", "-d", "--no-build", "--no-deps", "snipeit-mysql"]
+            self.assertEqual(
+                argv[argv.index("--project-directory") + 1], target,
+            )
+            self.assertTrue(runtime_path.startswith("/proc/4242/fd/"))
+        finally:
+            if runtime_fd >= 0:
+                os.close(runtime_fd)
+            restore_cmd._close_path_fds(retained)
+            os.close(dest_fd)
+            for backing in anonymous_files:
+                backing.close()
+
+    def test_runtime_compose_rejects_fd_magic_link_as_project_directory(self):
+        target = os.path.join(self.tmp, "app")
+        os.makedirs(target)
+        dest_fd = os.open(target, os.O_RDONLY)
+        try:
+            with mock.patch.object(
+                    restore_cmd.os, "memfd_create", create=True,
+            ), self.assertRaisesRegex(
+                    ValueError, "canonical host path",
+            ):
+                restore_cmd._write_runtime_compose(
+                    {"services": {}}, "/proc/4242/fd/71", target, [], "app",
+                    dest_fd=dest_fd,
+                )
+        finally:
+            os.close(dest_fd)
+
     def test_runtime_compose_is_anonymous_retained_and_rewrites_selected_roots(self):
         canonical_dest = os.path.join(self.tmp, "gitlab")
         external = os.path.join(self.tmp, "gitlab-registry")
@@ -130,7 +211,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             fh.write("secret\n")
         before = set(os.listdir(canonical_dest))
 
-        operation_dest = "/proc/4242/fd/71"
+        operation_dest = canonical_dest
         external_fd = os.open(external, os.O_RDONLY)
         anonymous_files = []
 
@@ -212,16 +293,10 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             runtime_model = json.loads(os.read(runtime_fd, 1024 * 1024))
             service = runtime_model["services"]["gitlab"]
             sources = [volume["source"] for volume in service["volumes"]]
-            retained_by_path = dict(runtime_source_fds)
-
             self.assertEqual(runtime_model["name"], "restored-gitlab")
             self.assertIn(operation_dest, sources)
             self.assertIn(operation_dest + "/config", sources)
-            self.assertIn(
-                "/proc/4242/fd/%d" % retained_by_path[
-                    os.path.join(external, "data")
-                ], sources,
-            )
+            self.assertIn(os.path.join(external, "data"), sources)
             self.assertIn("/etc/localtime", sources)
             self.assertIn("gitlab-cache", sources)
             self.assertEqual(service["build"]["context"], operation_dest + "/image")
@@ -231,9 +306,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             )
             self.assertEqual(
                 runtime_model["secrets"]["registry"]["file"],
-                "/proc/4242/fd/%d" % retained_by_path[
-                    os.path.join(external, "registry.secret")
-                ],
+                os.path.join(external, "registry.secret"),
             )
         finally:
             if runtime_fd >= 0:
@@ -288,7 +361,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             ):
                 runtime_fd, _runtime_path, retained = (
                     restore_cmd._write_runtime_compose(
-                        model, "/proc/4242/fd/%d" % dest_fd,
+                        model, canonical_dest,
                         canonical_dest, [(external, external_fd)], "app",
                         dest_fd=dest_fd,
                     )
@@ -307,11 +380,11 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
                 os.path.join(external, "registry"),
             })
             self.assertTrue(os.path.isdir(os.path.join(canonical_dest, "logs")))
-            self.assertTrue(all(source.startswith("/proc/4242/fd/") for source in sources))
-            self.assertNotIn(
-                "/proc/4242/fd/%d/data" % dest_fd,
-                sources,
-            )
+            self.assertEqual(sources, [
+                os.path.join(canonical_dest, "data"),
+                os.path.join(external, "registry"),
+                os.path.join(canonical_dest, "logs"),
+            ])
             for path, fd in retained:
                 restore_cmd._assert_path_matches_fd(path, fd)
         finally:
@@ -378,7 +451,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             ):
                 runtime_fd, _runtime_path, retained = (
                     restore_cmd._write_runtime_compose(
-                        runtime_model, "/proc/4242/fd/%d" % dest_fd,
+                        runtime_model, target,
                         target, [], "app", dest_fd=dest_fd,
                         trusted_file_fds=trusted,
                     )
@@ -387,7 +460,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             rendered = json.loads(os.read(runtime_fd, 1024 * 1024))
             self.assertEqual(
                 rendered["secrets"]["token"]["file"],
-                "/proc/4242/fd/%d" % trusted[0][1],
+                target_file,
             )
             self.assertIn(target_file, dict(retained))
 
@@ -402,7 +475,7 @@ class RestoreRuntimeComposeTest(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "changed before use"):
                     restore_cmd._write_runtime_compose(
-                        runtime_model, "/proc/4242/fd/%d" % dest_fd,
+                        runtime_model, target,
                         target, [], "app", dest_fd=dest_fd,
                         trusted_file_fds=trusted,
                     )
