@@ -22,7 +22,11 @@ class GitlabTemplateCreateTest(unittest.TestCase):
             mock.patch.object(create.util, "require_root"),
             mock.patch.object(create.compose, "find_compose_file",
                               return_value=os.path.join(self.stack, "docker-compose.yml")),
-            mock.patch.object(create.compose, "config_json", return_value={"name": "gitlab"}),
+            mock.patch.object(
+                create.compose,
+                "config_json",
+                return_value={"name": "gitlab", "services": {"gitlab": {}}},
+            ),
             mock.patch.object(create.compose, "collect_volume_backup_plan", return_value=([], [])),
             mock.patch.object(create.compose, "find_env_files", return_value=[]),
             mock.patch.object(create.systemd_units, "validate_oncalendar", return_value=True),
@@ -49,6 +53,7 @@ class GitlabTemplateCreateTest(unittest.TestCase):
             allow_hooks=allow,
             hooks_override=templates.to_hooks(tmpl),
             retention_override=tmpl.get("retention"),
+            restore_services=tmpl.get("restore_services"),
             template=templates.provenance(tmpl),
         )
 
@@ -66,6 +71,7 @@ class GitlabTemplateCreateTest(unittest.TestCase):
         self.assertTrue(cfg["hooks"]["pre_backup"])
         self.assertTrue(cfg["hooks"]["post_backup"])
         self.assertTrue(cfg["hooks"]["restore"])
+        self.assertEqual(cfg["restore_services"], ["gitlab"])
         # Fingerprint matches the stored commands -> run would not block.
         hooks.ensure_allowed(cfg)
 
@@ -93,19 +99,34 @@ class GitlabExcludeInvariantTest(unittest.TestCase):
         tmpl = templates.load("gitlab")
         excludes = restic.resolve_excludes("/opt/gitlab", [], tmpl["exclude_patterns"])
         backups = "/opt/gitlab/gitlab/data/backups"
+        archive = backups + "/1234567890_2026_07_16_18.9.0-ee_gitlab_backup.tar"
         for e in excludes:
             self.assertNotEqual(e, backups)
             self.assertFalse(backups.startswith(e.rstrip("/") + "/"),
                              "backups path falls under exclude %r" % e)
+            self.assertFalse(archive.startswith(e.rstrip("/") + "/"),
+                             "generated GitLab archive falls under exclude %r" % e)
 
     def test_live_dirs_are_excluded(self):
         tmpl = templates.load("gitlab")
         excludes = restic.resolve_excludes("/opt/gitlab", [], tmpl["exclude_patterns"])
         for live in ("/opt/gitlab/gitlab/data/postgresql",
                      "/opt/gitlab/gitlab/data/gitaly",
+                     "/opt/gitlab/gitlab/data/git-data",
                      "/opt/gitlab/gitlab/logs",
                      "/opt/gitlab/gitlab/data/redis"):
             self.assertIn(live, excludes)
+
+    def test_git_data_exclude_is_appended_for_stable_template_order(self):
+        tmpl = templates.load("gitlab")
+        self.assertEqual(tmpl["exclude_patterns"][-1], "gitlab/data/git-data")
+
+
+class GitlabRestoreHookInvariantTest(unittest.TestCase):
+    def test_restore_does_not_restart_outbound_services(self):
+        command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
+        self.assertIn("gitlab-backup restore", command)
+        self.assertNotIn("gitlab-ctl start", command)
 
 
 if __name__ == "__main__":

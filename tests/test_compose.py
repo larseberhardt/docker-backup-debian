@@ -157,6 +157,30 @@ class ComposeCleanupTest(unittest.TestCase):
                     self.compose_file, self.project_dir, "db", self.project_name,
                 )
 
+    def test_up_services_uses_exact_scope_without_dependencies(self):
+        with mock.patch.object(compose.util, "run") as run:
+            compose.up_services(
+                self.compose_file, self.project_dir, ["gitlab"],
+                self.project_name, no_deps=True,
+            )
+
+        run.assert_called_once_with(
+            [
+                "docker", "compose", "-f", self.compose_file,
+                "--project-directory", self.project_dir,
+                "-p", self.project_name,
+                "up", "-d", "--no-build", "--no-deps", "gitlab",
+            ],
+            mutating=True, capture=False,
+        )
+
+    def test_up_services_rejects_empty_scope(self):
+        with self.assertRaises(ValueError):
+            compose.up_services(
+                self.compose_file, self.project_dir, [], self.project_name,
+                no_deps=True,
+            )
+
 
 class ComposeRunningBindGuardTest(unittest.TestCase):
     @staticmethod

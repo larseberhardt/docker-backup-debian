@@ -226,6 +226,23 @@ def up_service(
     util.run(argv + [service], mutating=True, capture=False)
 
 
+def up_services(
+    compose_file, project_dir, services, project_name=None, *, no_deps=False,
+) -> None:
+    """Bring up only an explicit non-empty service list.
+
+    Custom application restores use ``no_deps=True`` so a GitLab service cannot
+    implicitly start a runner, DinD daemon, or another production integration.
+    Callers validate service identities against the authenticated Compose model.
+    """
+    if not isinstance(services, list) or not services:
+        raise ValueError("services must be a non-empty list")
+    argv = _base(compose_file, project_dir, project_name) + ["up", "-d", "--no-build"]
+    if no_deps:
+        argv.append("--no-deps")
+    util.run(argv + list(services), mutating=True, capture=False)
+
+
 def up_all(compose_file, project_dir, project_name=None) -> None:
     """Brings up the ENTIRE stack (``docker compose up -d``).
 

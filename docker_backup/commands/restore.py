@@ -406,7 +406,7 @@ def _apply_local_template_hooks(cfg: Dict[str, Any], *, save_config: bool) -> bo
         return False
 
     local_hooks = templates.to_hooks(tmpl)
-    local_fingerprint = hooks.compute_definition_fingerprint(local_hooks)
+    local_fingerprint = templates.hook_definition_fingerprint(tmpl)
     if not hmac.compare_digest(local_fingerprint, ref.get("hooks_fingerprint", "")):
         util.error(
             "Local template hook mismatch for '%s'. The source config was customized "
@@ -457,6 +457,14 @@ def _apply_local_template_hooks(cfg: Dict[str, Any], *, save_config: bool) -> bo
                         ),
                     )
                 )
+        restore_services = tmpl.get("restore_services")
+        if restore_services is not None:
+            services = templates.normalize_restore_services(restore_services)
+            util.warn(
+                "Custom restore startup is restricted to: %s "
+                "(--no-deps; transient published ports removed)."
+                % ", ".join(services)
+            )
         prompt = "Use these template commands for this restore"
         if save_config:
             prompt += " and approve them in the saved backup config"
@@ -468,6 +476,10 @@ def _apply_local_template_hooks(cfg: Dict[str, Any], *, save_config: bool) -> bo
     hooks.approve(cfg)
     cfg["template"] = local_provenance
     cfg["hooks_present"] = local_has_hooks
+    cfg["restore_services"] = (
+        templates.normalize_restore_services(tmpl["restore_services"])
+        if tmpl.get("restore_services") is not None else None
+    )
     cfg["_template_hooks_confirmed"] = True
     cfg["_resolved_template"] = copy.deepcopy(tmpl)
     return True
@@ -670,6 +682,9 @@ def _save_restored_config(
         "hooks": hooks_dict,
         "hooks_allowed": bool(cfg.get("hooks_allowed", False)),
         "hooks_fingerprint": cfg.get("hooks_fingerprint"),
+        "restore_services": copy.deepcopy(
+            resolved_template.get("restore_services")
+        ),
         "template": template_provenance,
         "schedule": schedule,
         "retention": copy.deepcopy(
@@ -1499,6 +1514,17 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
         util.error("Unsafe restore metadata: %s" % exc)
         return 1
 
+    restore_services = None
+    if not no_custom_restore and hooks.phase_hooks(cfg, "restore"):
+        try:
+            restore_services = _validated_restore_services(cfg)
+        except util.CommandError as exc:
+            util.error(
+                "Unsafe custom restore startup scope: %s"
+                % (exc.stderr or str(exc))
+            )
+            return 1
+
     if not util.DRY_RUN:
         try:
             _authenticate_manifest_snapshot(cfg, snapshot, restore_paths)
@@ -1672,9 +1698,11 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                 _authenticate_manifest_artifacts(
                     cfg, scratch_ref.fd, cfg["stack_path"],
                 )
+                _authenticate_restore_services(restore_services, cj)
             except (TypeError, ValueError, util.CommandError) as exc:
                 util.error(
-                    "Cannot authenticate manifest database/volume plan: %s" % exc
+                    "Cannot authenticate manifest database/volume/restore plan: %s"
+                    % exc
                 )
                 return 1
             will_import = no_custom_restore or not hooks.phase_hooks(cfg, "restore")
@@ -1840,8 +1868,11 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
     runtime_source_fds = []
     try:
         if placed_dest_fd >= 0:
+            runtime_cj = _custom_restore_runtime_model(
+                cj, restore_services,
+            ) if restore_services is not None else cj
             runtime_compose_fd, new_compose, runtime_source_fds = _write_runtime_compose(
-                cj, operation_dest, dest, external_target_fds, new_project,
+                runtime_cj, operation_dest, dest, external_target_fds, new_project,
                 dest_fd=placed_dest_fd,
                 trusted_file_fds=trusted_runtime_file_fds,
             )
@@ -1872,7 +1903,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             if not _custom_restore(
                     cfg, new_compose, operation_dest, new_project,
                     already_confirmed=bool(cfg.get("_restore_hooks_confirmed")),
-                    display_dest=dest):
+                    display_dest=dest, restore_services=restore_services):
                 return 1
             _cleanup_restore_staging(
                 operation_dest,
@@ -1955,12 +1986,80 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
         _close_path_fds(external_target_fds)
 
 
+def _validated_restore_services(cfg: Dict[str, Any]) -> Optional[list]:
+    """Return the optional restrictive startup scope from a trusted config.
+
+    The manifest bootstrap initializes this field to ``None`` and exact local
+    template reconstruction replaces it only after the compatibility hash is
+    verified.  An explicit empty/malformed value fails closed.
+    """
+    raw = cfg.get("restore_services")
+    if raw is None:
+        return None
+    return templates.normalize_restore_services(raw)
+
+
+def _authenticate_restore_services(
+    restore_services: Optional[list], compose_model: Dict[str, Any],
+) -> None:
+    """Bind every scoped service to the authenticated restored Compose model."""
+    if restore_services is None:
+        return
+    services = compose_model.get("services")
+    if not isinstance(services, dict):
+        raise ValueError("restored Compose model has no services object")
+    missing = [service for service in restore_services if service not in services]
+    if missing:
+        raise ValueError(
+            "restore service(s) not found in authenticated Compose: %s"
+            % ", ".join(missing)
+        )
+    for service_name in restore_services:
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            raise ValueError(
+                "restore service is not a Compose object: %s" % service_name
+            )
+        if service.get("network_mode") == "host":
+            raise ValueError(
+                "scoped restore service uses network_mode=host and cannot be "
+                "isolated from host listeners: %s" % service_name
+            )
+
+
+def _custom_restore_runtime_model(
+    compose_model: Dict[str, Any], restore_services: Optional[list],
+) -> Dict[str, Any]:
+    """Remove host-published ports from a scoped transient Compose model.
+
+    The canonical restored Compose file is unchanged. Only the sealed runtime
+    model used during the custom restore is restricted; every service is
+    stripped so even an unexpected Compose dependency cannot publish a port.
+    ``up --no-deps`` provides the independent service-start boundary.
+    """
+    if restore_services is None:
+        return compose_model
+    _authenticate_restore_services(restore_services, compose_model)
+    model = copy.deepcopy(compose_model)
+    for service in (model.get("services") or {}).values():
+        if isinstance(service, dict):
+            service.pop("ports", None)
+    return model
+
+
 def _confirm_custom_restore(cfg: Dict[str, Any]) -> bool:
     """Authorize restore hooks before restic, project shutdown, or placement."""
     cmds = [c for (phase, c) in hooks.describe_commands(cfg) if phase == "restore"]
     util.warn("This restore can run these custom commands as ROOT:")
     for command in cmds:
         util.warn("    %s" % command)
+    restore_services = _validated_restore_services(cfg)
+    if restore_services is not None:
+        util.warn(
+            "Only these Compose services will start: %s "
+            "(--no-deps; transient published ports removed)."
+            % ", ".join(restore_services)
+        )
     if not util.DRY_RUN and not wizard.confirm(
             "Run these restore commands after placing the data?", default=False):
         util.warn("Custom restore command not confirmed; nothing was restored.")
@@ -1973,6 +2072,7 @@ def _custom_restore(
     cfg, new_compose: str, dest: str, new_project: str,
     already_confirmed: bool = False,
     display_dest: Optional[str] = None,
+    restore_services: Optional[list] = None,
 ) -> bool:
     """Custom restore command (e.g. GitLab) instead of the built-in DB import.
 
@@ -1999,11 +2099,26 @@ def _custom_restore(
     hook_cfg["project_name"] = new_project
     hooks.approve(hook_cfg)
 
-    util.info("Bringing the stack up and running the restore command…")
+    if restore_services is None:
+        restore_services = _validated_restore_services(cfg)
+    if restore_services is None:
+        util.info("Bringing the stack up and running the restore command…")
+    else:
+        util.info(
+            "Starting only restore service(s) %s without dependencies or "
+            "published host ports, then running the restore command…"
+            % ", ".join(restore_services)
+        )
     try:
         # Keep startup inside the teardown guard: Compose can create some
         # containers and still return a failure for the overall `up` operation.
-        compose.up_all(new_compose, dest, new_project)
+        if restore_services is None:
+            compose.up_all(new_compose, dest, new_project)
+        else:
+            compose.up_services(
+                new_compose, dest, restore_services, new_project,
+                no_deps=True,
+            )
         hooks.run_hooks(hook_cfg, "restore")
     finally:
         # Runtime sources were verified through retained descriptors before

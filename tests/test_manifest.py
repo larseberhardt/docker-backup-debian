@@ -143,6 +143,20 @@ class DeriveTest(unittest.TestCase):
 
         self.assertNotEqual(original, changed)
 
+    def test_template_descriptor_binds_restore_service_scope_with_v2(self):
+        cfg = _sample_cfg()
+        tmpl = templates.load("gitlab")
+        cfg["template"] = templates.provenance(tmpl, source="builtin")
+        cfg["hooks"] = templates.to_hooks(tmpl)
+        cfg["restore_services"] = ["gitlab"]
+
+        original = _derive(cfg)["template"]["hooks_fingerprint"]
+        self.assertTrue(original.startswith("sha256-v2:"))
+
+        cfg["restore_services"] = ["gitlab-runner-1"]
+        changed = _derive(cfg)["template"]["hooks_fingerprint"]
+        self.assertNotEqual(original, changed)
+
     def test_includes_exclude_patterns_and_db_autodetect(self):
         cfg = _sample_cfg()
         cfg["exclude_patterns"] = ["gitlab/logs", "gitlab/data/postgresql"]
@@ -307,6 +321,22 @@ class CfgFromManifestTest(unittest.TestCase):
         self.assertEqual(restored["hooks"], {
             "pre_backup": [], "post_backup": [], "restore": [],
         })
+        self.assertIsNone(restored["restore_services"])
+
+    def test_v2_template_fingerprint_is_accepted_but_scope_is_not_trusted(self):
+        cfg = _sample_cfg()
+        tmpl = templates.load("gitlab")
+        cfg["template"] = templates.provenance(tmpl, source="builtin")
+        cfg["hooks"] = templates.to_hooks(tmpl)
+        cfg["restore_services"] = ["gitlab"]
+        man = _derive(cfg)
+
+        restored = manifest.cfg_from_manifest(man, "/mnt/gitlab", "/key")
+
+        self.assertTrue(
+            restored["template"]["hooks_fingerprint"].startswith("sha256-v2:")
+        )
+        self.assertIsNone(restored["restore_services"])
 
     def test_roundtrips_raw_external_bind_descriptors_for_target_resolver(self):
         cfg = _sample_cfg()

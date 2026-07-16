@@ -45,6 +45,9 @@ def _defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg.setdefault("exclude_patterns", [])
     cfg.setdefault("db_autodetect", True)
     cfg.setdefault("template", None)
+    # Optional template-owned restriction for custom restore startup.  None
+    # preserves the legacy behavior of starting the complete stack.
+    cfg.setdefault("restore_services", None)
     cfg.setdefault("extra_backup_paths", [])
     # Offsite repos are pruned with the primary retention unless overridden;
     # offsite_prune=False keeps every copied snapshot (unbounded growth).

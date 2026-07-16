@@ -181,6 +181,12 @@ def _cmd_set_locked(args, name: str) -> int:
     if hooks_modified:
         # Changed commands must be re-approved (fingerprint is now stale).
         hooks.revoke(cfg)
+        # A template startup scope is part of that template's reviewed restore
+        # contract. Once hook commands are edited manually, fall back to the
+        # generic full-stack behavior unless a future template is reapplied.
+        if (getattr(args, "restore_cmd", None) is not None
+                or getattr(args, "clear_hooks", False)):
+            cfg["restore_services"] = None
         changed = True
 
     allow = getattr(args, "allow_hooks", None)

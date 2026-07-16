@@ -30,6 +30,14 @@ allowlisted template descriptor: template name, schema version, exact local sour
 execution fields (`phase`, command, cwd, timeout and failure policy). Raw hook commands are
 never copied into the plaintext sidecar.
 
+A template may additionally bind `restore_services`. That restrictive startup scope is
+part of a versioned compatibility fingerprint (`sha256-v2`); templates without a scope keep
+the existing `sha256-v1` hook fingerprint byte-for-byte. During restore the listed names are
+validated against the authenticated Compose model before placement. Only those services are
+started, with `--no-deps`, and published ports are removed from the sealed transient Compose
+model. The canonical restored Compose file is not changed. An absent field retains the
+legacy full-stack custom-restore behavior; an explicit `null` or empty list is invalid.
+
 `restore --from-repo ... --use-template-hooks` loads only that exact local source (a
 builtin descriptor cannot be shadowed by `/etc`), compares the version and hash, displays
 every command and its execution policy, and asks for default-no approval independently of
@@ -67,6 +75,7 @@ must use a reviewed `--restore-cmd` or be replaced by a fresh backup manifest.
   "match": {                           // optional; powers `detect_template` suggestions
     "image_tokens": ["gitlab/gitlab-ce", "gitlab/gitlab-ee"]
   },
+  "restore_services": ["gitlab"],     // optional; non-empty custom-restore startup scope
   "hooks": {                           // optional; commands run as root AFTER approval
     "pre_backup":  [ {"cmd": "...", "on_failure": "abort", "timeout": 3600, "cwd": "stack", "name": "..."} ],
     "post_backup": [ {"cmd": "...", "on_failure": "warn"} ],
@@ -85,6 +94,10 @@ template):
   (default for post). `cwd` is `"stack"` (the stack folder, default) or an absolute path.
   Hooks receive `DOCKER_BACKUP_STACK_PATH`, `DOCKER_BACKUP_NAME`,
   `DOCKER_BACKUP_COMPOSE_FILE`, `DOCKER_BACKUP_PROJECT`, `DOCKER_BACKUP_PHASE`.
+- `restore_services`, when present, must be a non-empty, duplicate-free list of valid
+  Compose service names and requires a restore hook. Scoped services are started with
+  `--no-deps`; the transient restore model publishes no host ports. A scoped service using
+  `network_mode: host` is rejected because its listeners cannot be isolated this way.
 - `retention` counts must be integers ≥ 0; `keep_within` is a restic duration like `30d`.
 
 ## Precedence when applying

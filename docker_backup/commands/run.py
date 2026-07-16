@@ -12,7 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from .. import compose, config, dbdump, detect, hooks, manifest, notify, quiesce, restic, runtime, status, util, volumes
+from .. import (compose, config, dbdump, detect, hooks, manifest, notify,
+                quiesce, restic, runtime, status, templates, util, volumes)
 
 
 @dataclass
@@ -117,6 +118,20 @@ def _do_run(cfg: Dict[str, Any]) -> str:
     created_snapshot = None  # type: Any
     cfg["_last_run_snapshot_id"] = None
 
+    restore_services = cfg.get("restore_services")
+    if restore_services is not None:
+        if not isinstance(cfg.get("template"), dict):
+            raise util.CommandError(
+                ["backup", "restore-services"], 1,
+                "restore_services is allowed only for a template-bound config.",
+            )
+        # Validate and compute the exact compatibility binding before a pre-hook
+        # can create an application dump or restic can create a snapshot.
+        restore_services = templates.normalize_restore_services(restore_services)
+        templates.definition_fingerprint(
+            cfg.get("hooks") or {}, restore_services,
+        )
+
     # Fail-fast: stored but not (validly) approved hooks abort the run IMMEDIATELY —
     # no silent skipping (e.g. of GitLab's pre-dump).
     hooks.ensure_allowed(cfg)
@@ -131,6 +146,20 @@ def _do_run(cfg: Dict[str, Any]) -> str:
     # the logical dump.
     db_services = cfg.get("db_services") or []
     cj = compose.config_json(compose_file, stack, project)
+    if restore_services is not None:
+        services = cj.get("services")
+        if not isinstance(services, dict):
+            raise util.CommandError(
+                ["backup", "restore-services"], 1,
+                "Current Compose model has no services object.",
+            )
+        missing = [service for service in restore_services if service not in services]
+        if missing:
+            raise util.CommandError(
+                ["backup", "restore-services"], 1,
+                "Restore service(s) not found in current Compose: %s"
+                % ", ".join(missing),
+            )
     _verify_mysql_db_scope(cfg, cj)
     _verify_backup_db_excludes(
         cfg.get("exclude_paths") or [], db_services, cj,

@@ -14,6 +14,7 @@ gate lives in :mod:`docker_backup.hooks`. Control = provenance
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -29,9 +30,11 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _ALLOWED_KEYS = {
     "template_schema_version", "name", "description", "db_autodetect",
     "exclude_patterns", "schedule", "retention", "hooks", "match",
+    "restore_services",
 }
 _ALLOWED_HOOK_KEYS = {"cmd", "on_failure", "timeout", "cwd", "name"}
 _ALLOWED_RETENTION_KEYS = {"daily", "weekly", "monthly", "keep_within"}
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def valid_name(name: Any) -> bool:
@@ -183,6 +186,10 @@ def validate(t: Dict[str, Any]) -> Dict[str, Any]:
         restic.validate_exclude_pattern(p)  # rejects '..'/empty
     _validate_retention(t.get("retention"))
     _validate_hooks(t.get("hooks"))
+    _validate_restore_services(
+        t.get("restore_services"), t.get("hooks"),
+        declared="restore_services" in t,
+    )
     return t
 
 
@@ -222,6 +229,51 @@ def _validate_hooks(hk: Any) -> None:
                                         "on_failure must be 'abort' or 'warn'.")
 
 
+def _validate_restore_services(
+    raw: Any, hk: Any = None, *, declared: bool = False,
+) -> None:
+    """Validate the optional, restrictive custom-restore startup scope.
+
+    An absent field preserves the long-standing behavior (bring up the complete
+    stack).  An empty or malformed field must never accidentally mean that.
+    """
+    if not declared:
+        return
+    normalize_restore_services(raw)
+    restore_hooks = (hk or {}).get("restore") if isinstance(hk, dict) else None
+    if not restore_hooks:
+        raise util.CommandError(
+            ["template"], 2,
+            "restore_services requires at least one restore hook.",
+        )
+
+
+def normalize_restore_services(raw: Any) -> List[str]:
+    """Return a validated copy of a non-empty Compose service-name list."""
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        raise util.CommandError(
+            ["template"], 2,
+            "'restore_services' must be a non-empty list with at most 32 services.",
+        )
+    seen = set()
+    out = []
+    for service in raw:
+        if (not isinstance(service, str) or len(service) > 128
+                or not _SERVICE_RE.fullmatch(service)):
+            raise util.CommandError(
+                ["template"], 2,
+                "restore_services contains an invalid Compose service name.",
+            )
+        if service in seen:
+            raise util.CommandError(
+                ["template"], 2,
+                "restore_services contains a duplicate service: %s" % service,
+            )
+        seen.add(service)
+        out.append(service)
+    return out
+
+
 # --- application ------------------------------------------------------------
 def to_hooks(t: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     """Normalizes the hook definitions into full hook objects (per-phase defaults)."""
@@ -259,8 +311,40 @@ def provenance(t: Dict[str, Any], source: Optional[str] = None) -> Dict[str, Any
 
 
 def hook_definition_fingerprint(t: Dict[str, Any]) -> str:
-    """Compatibility hash for locally reconstructed template hooks."""
-    return hooks.compute_definition_fingerprint(to_hooks(t))
+    """Compatibility hash for reconstructed hooks and their startup scope.
+
+    The field in the manifest keeps its historical ``hooks_fingerprint`` name,
+    but the compatibility contract also covers ``restore_services``.  Changing
+    or removing the restrictive service scope therefore requires a fresh
+    snapshot-bound manifest.
+    """
+    return definition_fingerprint(
+        to_hooks(t),
+        t["restore_services"] if "restore_services" in t else None,
+    )
+
+
+def definition_fingerprint(
+    hook_definitions: Dict[str, Any], restore_services: Any,
+) -> str:
+    """Hash normalized hooks plus the optional custom-restore startup scope."""
+    if restore_services is None:
+        # Preserve existing template descriptors exactly when no startup scope
+        # is declared. Scoped templates deliberately use a new fingerprint
+        # version so older restore binaries reject them before any work starts.
+        return hooks.compute_definition_fingerprint(hook_definitions)
+    services = normalize_restore_services(restore_services)
+    payload = json.dumps(
+        {
+            "hook_definitions": hooks.compute_definition_fingerprint(hook_definitions),
+            "restore_services": services,
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")
+    digest = hashlib.sha256(
+        b"docker-backup-template-compatibility-v2\0" + payload
+    ).hexdigest()
+    return "sha256-v2:%s" % digest
 
 
 def detect_template(compose_json: Dict[str, Any]) -> Optional[str]:

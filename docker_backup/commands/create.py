@@ -75,6 +75,7 @@ def cmd_create(args) -> int:
             restore_cmd=getattr(args, "restore_cmd", None),
             allow_hooks=getattr(args, "allow_hooks", False),
             hooks_override=templates.to_hooks(tmpl) if tmpl else None,
+            restore_services=(tmpl or {}).get("restore_services"),
             retention_override=(tmpl or {}).get("retention"),
             template=templates.provenance(tmpl, source=tmpl_source) if tmpl else None,
         )
@@ -105,6 +106,7 @@ def create_one(
     restore_cmd: Optional[str] = None,
     allow_hooks: bool = False,
     hooks_override: Optional[Dict[str, Any]] = None,
+    restore_services: Optional[List[str]] = None,
     retention_override: Optional[Dict[str, Any]] = None,
     template: Optional[Dict[str, Any]] = None,
 ) -> int:
@@ -182,6 +184,28 @@ def create_one(
         hooks_dict["post_backup"] = [hooks.make_hook(post_cmd, phase="post_backup")]
     if restore_cmd:
         hooks_dict["restore"] = [hooks.make_hook(restore_cmd, phase="restore")]
+        # An explicit command is no longer the reviewed template restore and
+        # must retain generic full-stack startup semantics.
+        restore_services = None
+    if restore_services is not None:
+        try:
+            restore_services = templates.normalize_restore_services(restore_services)
+        except util.CommandError as exc:
+            util.error(exc.stderr or str(exc))
+            return 1
+        if not hooks_dict["restore"]:
+            util.error("restore_services requires a custom restore hook.")
+            return 1
+        missing_restore_services = [
+            service for service in restore_services
+            if service not in (cj.get("services") or {})
+        ]
+        if missing_restore_services:
+            util.error(
+                "Restore service(s) not found in Compose: %s"
+                % ", ".join(missing_restore_services)
+            )
+            return 1
     hooks_present = any(hooks_dict.values())
     hooks_allowed = False
     hooks_fingerprint = None
@@ -241,6 +265,7 @@ def create_one(
         hooks=hooks_dict,
         hooks_allowed=hooks_allowed,
         hooks_fingerprint=hooks_fingerprint,
+        restore_services=restore_services,
         template=template,
         retention=retention,
         schedule_input=schedule_input,
@@ -422,6 +447,7 @@ def _assemble_config(**k) -> Dict[str, Any]:
         "hooks": k.get("hooks") or {"pre_backup": [], "post_backup": [], "restore": []},
         "hooks_allowed": k.get("hooks_allowed", False),
         "hooks_fingerprint": k.get("hooks_fingerprint"),
+        "restore_services": k.get("restore_services"),
         "template": k.get("template"),
         "schedule": {
             "input": k["schedule_input"],

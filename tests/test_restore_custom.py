@@ -38,6 +38,7 @@ class RestoreCustomTest(unittest.TestCase):
             mock.patch.object(restore_cmd, "_restore_named_volumes"),
             mock.patch.object(restore_cmd, "_import_databases"),
             mock.patch.object(restore_cmd.compose, "up_all"),
+            mock.patch.object(restore_cmd.compose, "up_services"),
             mock.patch.object(restore_cmd.compose, "down_all"),
             mock.patch.object(restore_cmd.hooks, "run_hooks"),
         ]
@@ -86,6 +87,92 @@ class RestoreCustomTest(unittest.TestCase):
             "/runtime-compose", "/stable/project", "gitlab",
         )
         restore_cmd.hooks.run_hooks.assert_not_called()
+
+    def test_scoped_restore_starts_only_listed_service_without_dependencies(self):
+        cfg = _cfg()
+        cfg["restore_services"] = ["gitlab"]
+
+        self.assertTrue(restore_cmd._custom_restore(
+            cfg, "/runtime-compose", "/stable/project", "gitlab",
+            already_confirmed=True,
+        ))
+
+        restore_cmd.compose.up_services.assert_called_once_with(
+            "/runtime-compose", "/stable/project", ["gitlab"], "gitlab",
+            no_deps=True,
+        )
+        restore_cmd.compose.up_all.assert_not_called()
+        restore_cmd.compose.down_all.assert_called_once_with(
+            "/runtime-compose", "/stable/project", "gitlab",
+        )
+
+    def test_scoped_start_failure_still_tears_entire_project_down(self):
+        cfg = _cfg()
+        cfg["restore_services"] = ["gitlab"]
+        restore_cmd.compose.up_services.side_effect = RuntimeError("partial scoped up")
+
+        with self.assertRaisesRegex(RuntimeError, "partial scoped up"):
+            restore_cmd._custom_restore(
+                cfg, "/runtime-compose", "/stable/project", "gitlab",
+                already_confirmed=True,
+            )
+
+        restore_cmd.compose.down_all.assert_called_once_with(
+            "/runtime-compose", "/stable/project", "gitlab",
+        )
+        restore_cmd.hooks.run_hooks.assert_not_called()
+
+    def test_scoped_hook_failure_still_tears_entire_project_down(self):
+        cfg = _cfg()
+        cfg["restore_services"] = ["gitlab"]
+        restore_cmd.hooks.run_hooks.side_effect = RuntimeError("restore hook failed")
+
+        with self.assertRaisesRegex(RuntimeError, "restore hook failed"):
+            restore_cmd._custom_restore(
+                cfg, "/runtime-compose", "/stable/project", "gitlab",
+                already_confirmed=True,
+            )
+
+        restore_cmd.compose.down_all.assert_called_once_with(
+            "/runtime-compose", "/stable/project", "gitlab",
+        )
+
+    def test_scoped_runtime_model_strips_all_published_ports_without_mutating_source(self):
+        source = {
+            "services": {
+                "gitlab": {"ports": [{"target": 80, "published": "30080"}]},
+                "runner": {"ports": [{"target": 9000, "published": "39000"}]},
+            }
+        }
+
+        runtime_model = restore_cmd._custom_restore_runtime_model(
+            source, ["gitlab"],
+        )
+
+        self.assertNotIn("ports", runtime_model["services"]["gitlab"])
+        self.assertNotIn("ports", runtime_model["services"]["runner"])
+        self.assertIn("ports", source["services"]["gitlab"])
+
+    def test_scope_rejects_unknown_service_and_host_network(self):
+        with self.assertRaisesRegex(ValueError, "not found"):
+            restore_cmd._authenticate_restore_services(
+                ["gitlab"], {"services": {"runner": {}}},
+            )
+        with self.assertRaisesRegex(ValueError, "network_mode=host"):
+            restore_cmd._authenticate_restore_services(
+                ["gitlab"], {"services": {"gitlab": {"network_mode": "host"}}},
+            )
+
+    def test_malformed_scope_fails_before_restic_restore(self):
+        cfg = _cfg()
+        cfg["restore_services"] = []
+
+        rc = restore_cmd._run_restore(
+            cfg, "gitlab", "/opt/gitlab-test", "latest", True,
+        )
+
+        self.assertEqual(rc, 1)
+        restore_cmd.restic.restore.assert_not_called()
 
 
 if __name__ == "__main__":

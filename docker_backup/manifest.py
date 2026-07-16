@@ -131,8 +131,8 @@ def _derive_template_descriptor(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "source": source,
         # Recomputed from the actual config hooks: a CLI/set override after
         # template creation intentionally makes a local template mismatch.
-        "hooks_fingerprint": hooks.compute_definition_fingerprint(
-            cfg.get("hooks") or {}
+        "hooks_fingerprint": templates.definition_fingerprint(
+            cfg.get("hooks") or {}, cfg.get("restore_services")
         ),
         "hooks_present": hooks.has_commands(cfg),
     }
@@ -326,6 +326,10 @@ def cfg_from_manifest(
         "hooks": {"pre_backup": [], "post_backup": [], "restore": []},
         "hooks_allowed": False,
         "hooks_fingerprint": None,
+        # Restore startup scope is never trusted from the plaintext sidecar.
+        # Exact template reconstruction supplies it locally after the descriptor
+        # compatibility hash has been verified.
+        "restore_services": None,
         "repo": repo,
         "key_file": key_file,
         "backend_env_file": None,
@@ -379,9 +383,14 @@ def _parse_template_descriptor(raw: Any) -> Tuple[Optional[Dict[str, Any]], Opti
         return None, "invalid template version"
     if source not in ("builtin", "operator"):
         return None, "invalid template source"
-    if (not isinstance(fingerprint, str) or not fingerprint.startswith("sha256-v1:")
-            or len(fingerprint) != len("sha256-v1:") + 64
-            or any(c not in "0123456789abcdef" for c in fingerprint[len("sha256-v1:"):])):
+    prefixes = ("sha256-v1:", "sha256-v2:")
+    prefix = next(
+        (candidate for candidate in prefixes
+         if isinstance(fingerprint, str) and fingerprint.startswith(candidate)),
+        None,
+    )
+    if (prefix is None or len(fingerprint) != len(prefix) + 64
+            or any(c not in "0123456789abcdef" for c in fingerprint[len(prefix):])):
         return None, "invalid template hook fingerprint"
     if not isinstance(present, bool):
         return None, "invalid hooks_present marker"

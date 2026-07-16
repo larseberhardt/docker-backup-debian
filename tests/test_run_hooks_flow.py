@@ -117,6 +117,34 @@ class HookGateInFlowTest(unittest.TestCase):
             run_cmd._do_run(cfg)
         self.assertFalse(run_cmd.restic.backup.called)
 
+    def test_malformed_template_restore_scope_aborts_before_hook_and_backup(self):
+        cfg = _cfg(
+            template={"name": "gitlab", "version": "1", "source": "builtin"},
+            restore_services=[],
+        )
+        with mock.patch.object(run_cmd.hooks, "run_hooks") as run_hooks, \
+                self.assertRaises(util.CommandError):
+            run_cmd._do_run(cfg)
+
+        run_hooks.assert_not_called()
+        run_cmd.restic.backup.assert_not_called()
+
+    def test_template_restore_scope_requires_service_in_current_compose(self):
+        cfg = _cfg(
+            template={"name": "gitlab", "version": "1", "source": "builtin"},
+            restore_services=["gitlab"],
+        )
+        with mock.patch.object(
+                run_cmd.compose, "config_json",
+                return_value={"services": {"runner": {}}, "volumes": {}},
+        ), mock.patch.object(run_cmd.hooks, "run_hooks") as run_hooks:
+            with self.assertRaises(util.CommandError) as raised:
+                run_cmd._do_run(cfg)
+
+        self.assertIn("not found", raised.exception.stderr)
+        run_hooks.assert_not_called()
+        run_cmd.restic.backup.assert_not_called()
+
 
 class DbSkipTest(unittest.TestCase):
     def setUp(self):

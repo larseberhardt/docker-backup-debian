@@ -8,7 +8,7 @@ import unittest
 
 import _support  # noqa: F401
 
-from docker_backup import templates, util
+from docker_backup import hooks, templates, util
 
 
 def _valid():
@@ -67,6 +67,18 @@ class ValidateTest(unittest.TestCase):
         with self.assertRaises(util.CommandError):
             templates.validate(t)
 
+    def test_restore_services_requires_nonempty_valid_unique_list_and_restore_hook(self):
+        for value in (None, [], "gitlab", ["bad/service"], ["gitlab", "gitlab"]):
+            t = _valid()
+            t["restore_services"] = value
+            with self.subTest(value=value), self.assertRaises(util.CommandError):
+                templates.validate(t)
+
+        t = _valid()
+        t["hooks"]["restore"] = [{"cmd": "docker exec gitlab true"}]
+        t["restore_services"] = ["gitlab"]
+        self.assertEqual(templates.validate(t)["restore_services"], ["gitlab"])
+
 
 class ToHooksTest(unittest.TestCase):
     def test_normalizes_phase_defaults(self):
@@ -87,6 +99,23 @@ class ToHooksTest(unittest.TestCase):
             templates.hook_definition_fingerprint(a),
             templates.hook_definition_fingerprint(b),
         )
+
+    def test_unscoped_fingerprint_remains_v1_and_scope_uses_v2(self):
+        t = _valid()
+        old = templates.hook_definition_fingerprint(t)
+        self.assertEqual(
+            old,
+            hooks.compute_definition_fingerprint(templates.to_hooks(t)),
+        )
+        self.assertTrue(old.startswith("sha256-v1:"))
+
+        t["hooks"]["restore"] = [{"cmd": "docker exec gitlab true"}]
+        t["restore_services"] = ["gitlab"]
+        scoped = templates.hook_definition_fingerprint(t)
+        self.assertTrue(scoped.startswith("sha256-v2:"))
+
+        t["restore_services"] = ["gitlab-api"]
+        self.assertNotEqual(scoped, templates.hook_definition_fingerprint(t))
 
 
 class ShippedTemplatesTest(unittest.TestCase):

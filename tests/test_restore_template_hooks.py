@@ -30,6 +30,7 @@ def _gitlab_manifest():
         "exclude_patterns": list(tmpl.get("exclude_patterns") or []),
         "db_autodetect": False,
         "hooks": templates.to_hooks(tmpl),
+        "restore_services": tmpl.get("restore_services"),
         "template": templates.provenance(tmpl, source="builtin"),
         "schedule": {"input": "daily 04:00", "oncalendar": "*-*-* 04:00:00",
                      "randomized_delay_sec": 300},
@@ -80,6 +81,7 @@ class TemplateHookResolutionTest(unittest.TestCase):
         self.assertTrue(cfg["hooks"]["post_backup"])
         self.assertTrue(cfg["hooks"]["restore"])
         self.assertTrue(cfg["_template_hooks_confirmed"])
+        self.assertEqual(cfg["restore_services"], ["gitlab"])
         hooks.ensure_allowed(cfg)
 
     def test_confirmation_decline_even_with_force_stops_before_restic(self):
@@ -114,6 +116,22 @@ class TemplateHookResolutionTest(unittest.TestCase):
             self.assertFalse(restore_cmd._apply_local_template_hooks(cfg, save_config=False))
         confirm.assert_not_called()
         self.assertEqual(cfg["hooks"]["restore"], [])
+
+    def test_restore_service_scope_mismatch_fails_before_confirmation(self):
+        man = _gitlab_manifest()
+        tmpl = templates.load_exact("gitlab", "builtin")
+        man["template"]["hooks_fingerprint"] = templates.definition_fingerprint(
+            templates.to_hooks(tmpl), ["gitlab-runner-1"],
+        )
+        cfg = self._cfg(man)
+
+        with mock.patch.object(restore_cmd.wizard, "confirm") as confirm:
+            self.assertFalse(restore_cmd._apply_local_template_hooks(
+                cfg, save_config=False,
+            ))
+
+        confirm.assert_not_called()
+        self.assertIsNone(cfg["restore_services"])
 
     def test_version_mismatch_fails_closed(self):
         man = _gitlab_manifest()
@@ -375,6 +393,7 @@ class TemplateRestoreSaveFlowTest(unittest.TestCase):
         self.assertTrue(saved["hooks"]["pre_backup"])
         self.assertTrue(saved["hooks"]["post_backup"])
         self.assertTrue(saved["hooks"]["restore"])
+        self.assertEqual(saved["restore_services"], ["gitlab"])
         hooks.ensure_allowed(saved)
         dropin.assert_called_once()
         self.assertEqual(disable.call_count, 3)

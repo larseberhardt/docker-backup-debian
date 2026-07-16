@@ -331,14 +331,14 @@ sudo docker-backup create /opt/gitlab --from-template gitlab \
      --target /mnt/backups --allow-hooks
 ```
 
-This produces a config with `db_autodetect=false`, the ~25 live-data excludes,
+This produces a config with `db_autodetect=false`, the live-data excludes,
 `retention { daily 7, keep_within "30d" }`, `daily 04:00`, and the three commands:
 
 | Phase    | Command                                                                 |
 |----------|-------------------------------------------------------------------------|
 | pre      | remove stale generated archives, then `gitlab-backup create CRON=1`      |
 | post     | `rm -f gitlab/data/backups/*.tar` *(cwd = stack)*                       |
-| restore  | `gitlab-ctl stop puma && … GITLAB_ASSUME_YES=1 … restore && … start`   |
+| restore  | stop Puma/Sidekiq, then run `GITLAB_ASSUME_YES=1 … restore`            |
 
 A backup run then: pre-hook creates the consistent dump → the DB loop is skipped →
 restic archives `/opt/gitlab` **with** the fresh `.tar` but **without** the live dirs →
@@ -346,7 +346,9 @@ the post-hook deletes the archived `.tar` (runs even if the backup failed).
 
 > The `.tar` that `gitlab-backup create` writes (under `gitlab/data/backups/`) is
 > deliberately **not** in the exclude list — it is the only consistent DB copy and must be
-> archived. The template ships a test asserting this.
+> archived. In contrast, the raw `gitlab/data/git-data` repository tree is explicitly
+> excluded because those repositories are already contained in that application archive.
+> The template ships tests asserting both invariants.
 
 With GitLab's local filesystem storage, that application archive also contains repositories,
 uploads, artifacts, packages, LFS objects and local container-registry images. The matching
@@ -364,17 +366,31 @@ ambiguous archive set therefore fails closed. It also sets `GITLAB_ASSUME_YES=1`
 so an unattended restore cannot wait at GitLab's destructive-action prompts. On a fresh
 server it first waits up to 20 minutes for `gitlab-rake gitlab:env:info` to succeed, printing
 a status line every 20 seconds; this prevents the restore from racing Omnibus first-boot
-reconfiguration and makes a real wait visible instead of looking frozen.
+reconfiguration and makes a real wait visible instead of looking frozen. Only the `gitlab`
+Compose service is started for this hook (not Runner or DinD), without published host ports.
+The hook deliberately does not restart Puma or Sidekiq after importing; `docker-backup`
+stops the temporary restore service in its cleanup path, avoiding even a brief window for
+restored jobs, email or webhooks to leave the drill server.
 
-Existing GitLab configs keep their previously stored hook. Before creating the first v5
-manifest, align an older config with the current builtin template and re-approve it:
+Existing GitLab configs keep all previously stored settings; `docker-backup set` cannot add
+the builtin template provenance or replace the complete exclude/hook set. Before creating
+the first v5 manifest, recreate an older config from the current builtin template. First run
+`docker-backup ls` and record its existing repository target. Pass the repository's **parent
+base** to `--target` (for example, repository `/mnt/backups/gitlab` means target base
+`/mnt/backups`):
 
 ```bash
-sudo docker-backup set gitlab \
-  --pre-cmd 'rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1' \
-  --restore-cmd 'backup_dir=gitlab/data/backups; set -- "$backup_dir"/*_gitlab_backup.tar; if [ "$#" -ne 1 ] || [ ! -f "$1" ] || [ -L "$1" ]; then echo "Expected exactly one regular GitLab backup archive in $backup_dir; found $#." >&2; exit 1; fi; archive=${1##*/}; backup=${archive%_gitlab_backup.tar}; case "$backup" in ""|*[!A-Za-z0-9_.-]*) echo "Unsafe GitLab backup ID: $backup" >&2; exit 1;; esac; attempt=0; until docker exec gitlab gitlab-rake gitlab:env:info >/dev/null 2>&1; do attempt=$((attempt + 1)); if [ "$attempt" -ge 60 ]; then echo "GitLab did not become ready within 20 minutes." >&2; exit 1; fi; echo "Waiting for GitLab initialization ($attempt/60)..."; sleep 20; done && docker exec gitlab gitlab-ctl stop puma && docker exec gitlab gitlab-ctl stop sidekiq && docker exec -e GITLAB_ASSUME_YES=1 gitlab gitlab-backup restore BACKUP="$backup" && docker exec gitlab gitlab-ctl start' \
-  --allow-hooks
+sudo docker-backup ls
+sudo docker-backup create /opt/gitlab --name gitlab \
+  --from-template gitlab --target /mnt/backups \
+  --allow-hooks --force --non-interactive
 ```
+
+`--force` replaces only the local config; the existing
+`/etc/docker-backup/keys/gitlab.key` is deliberately reused, so the existing repository
+remains readable. If the old config used an offsite repository or non-default scheduling,
+pass the corresponding `--offsite`/`--schedule` values as well. Review the resulting config,
+then run one fresh backup to publish a template-bound v5 manifest.
 
 ### Building configs by hand (without a template)
 
