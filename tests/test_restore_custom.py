@@ -137,11 +137,29 @@ class RestoreCustomTest(unittest.TestCase):
             "/runtime-compose", "/stable/project", "gitlab",
         )
 
-    def test_scoped_runtime_model_strips_all_published_ports_without_mutating_source(self):
+    def test_scoped_runtime_model_disables_all_restart_policies_without_mutating_source(self):
         source = {
             "services": {
-                "gitlab": {"ports": [{"target": 80, "published": "30080"}]},
-                "runner": {"ports": [{"target": 9000, "published": "39000"}]},
+                "gitlab": {
+                    "ports": [{"target": 80, "published": "30080"}],
+                    "restart": "always",
+                    "healthcheck": {
+                        "test": ["CMD", "/opt/gitlab/bin/gitlab-healthcheck"],
+                        "interval": "60s",
+                    },
+                    "deploy": {
+                        "resources": {"limits": {"memory": "12G"}},
+                        "restart_policy": {
+                            "condition": "any",
+                            "delay": "5s",
+                        },
+                    },
+                },
+                "runner": {
+                    "ports": [{"target": 9000, "published": "39000"}],
+                    "restart": "unless-stopped",
+                    "healthcheck": {"test": ["CMD", "runner-healthcheck"]},
+                },
             }
         }
 
@@ -151,7 +169,58 @@ class RestoreCustomTest(unittest.TestCase):
 
         self.assertNotIn("ports", runtime_model["services"]["gitlab"])
         self.assertNotIn("ports", runtime_model["services"]["runner"])
+        self.assertEqual(runtime_model["services"]["gitlab"]["restart"], "no")
+        self.assertEqual(runtime_model["services"]["runner"]["restart"], "no")
+        self.assertEqual(
+            runtime_model["services"]["gitlab"]["healthcheck"],
+            {"disable": True},
+        )
+        self.assertEqual(
+            runtime_model["services"]["runner"]["healthcheck"],
+            {"disable": True},
+        )
+        self.assertNotIn(
+            "restart_policy", runtime_model["services"]["gitlab"]["deploy"],
+        )
+        self.assertEqual(
+            runtime_model["services"]["gitlab"]["deploy"]["resources"],
+            {"limits": {"memory": "12G"}},
+        )
         self.assertIn("ports", source["services"]["gitlab"])
+        self.assertEqual(source["services"]["gitlab"]["restart"], "always")
+        self.assertEqual(
+            source["services"]["gitlab"]["healthcheck"],
+            {
+                "test": ["CMD", "/opt/gitlab/bin/gitlab-healthcheck"],
+                "interval": "60s",
+            },
+        )
+        self.assertEqual(
+            source["services"]["gitlab"]["deploy"]["restart_policy"],
+            {"condition": "any", "delay": "5s"},
+        )
+
+    def test_unscoped_runtime_model_is_not_rewritten(self):
+        source = {
+            "services": {
+                "app": {
+                    "ports": [{"target": 80, "published": "8080"}],
+                    "restart": "always",
+                    "healthcheck": {"test": ["CMD", "true"]},
+                    "deploy": {"restart_policy": {"condition": "any"}},
+                },
+            },
+        }
+
+        runtime_model = restore_cmd._custom_restore_runtime_model(source, None)
+
+        self.assertIs(runtime_model, source)
+        self.assertEqual(runtime_model["services"]["app"]["restart"], "always")
+        self.assertEqual(
+            runtime_model["services"]["app"]["healthcheck"],
+            {"test": ["CMD", "true"]},
+        )
+        self.assertIn("restart_policy", runtime_model["services"]["app"]["deploy"])
 
     def test_scope_rejects_unknown_service_and_host_network(self):
         with self.assertRaisesRegex(ValueError, "not found"):

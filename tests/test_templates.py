@@ -137,15 +137,30 @@ class ShippedTemplatesTest(unittest.TestCase):
 
     def test_gitlab_restore_waits_for_first_boot_and_never_prompts(self):
         gitlab = templates.load("gitlab")
+        self.assertEqual(gitlab["template_schema_version"], 1)
         restore = gitlab["hooks"]["restore"]
         self.assertEqual(len(restore), 1)
         command = restore[0]["cmd"]
+        self.assertIn("docker inspect -f '{{.State.Running}}' gitlab", command)
+        self.assertIn("[c]inc-client|[c]hef-client|[g]itlab-ctl reconfigure", command)
+        self.assertIn("docker logs --tail 300 gitlab", command)
+        self.assertIn("gitlab Reconfigured!", command)
+        self.assertIn(
+            "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10", command,
+        )
         self.assertIn("gitlab-rake gitlab:env:info", command)
-        self.assertIn("Waiting for GitLab initialization", command)
-        self.assertIn('"$attempt" -ge 60', command)
+        self.assertIn('while [ "$ready_passes" -lt 2 ]', command)
+        self.assertIn('"$reconfigure_attempt" -ge 90', command)
+        self.assertIn('"$ready_attempt" -ge 90', command)
         self.assertIn("GITLAB_ASSUME_YES=1", command)
         self.assertIn('BACKUP="$backup"', command)
         self.assertIn("Expected exactly one regular GitLab backup archive", command)
+        self.assertLess(command.index("gitlab Reconfigured!"),
+                        command.index("gitlab-healthcheck"))
+        self.assertLess(command.index("gitlab-healthcheck"),
+                        command.index("gitlab-ctl stop puma"))
+        self.assertLess(command.index("gitlab-ctl stop puma"),
+                        command.index("gitlab-backup restore"))
         # Keep this equal to hooks.make_hook's restore default: an existing
         # config aligned through `set --restore-cmd` must have the same full
         # definition fingerprint as the builtin template.

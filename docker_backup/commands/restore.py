@@ -462,7 +462,8 @@ def _apply_local_template_hooks(cfg: Dict[str, Any], *, save_config: bool) -> bo
             services = templates.normalize_restore_services(restore_services)
             util.warn(
                 "Custom restore startup is restricted to: %s "
-                "(--no-deps; transient published ports removed)."
+                "(--no-deps; transient published ports removed and automatic "
+                "restart policies and health checks disabled)."
                 % ", ".join(services)
             )
         prompt = "Use these template commands for this restore"
@@ -2030,12 +2031,15 @@ def _authenticate_restore_services(
 def _custom_restore_runtime_model(
     compose_model: Dict[str, Any], restore_services: Optional[list],
 ) -> Dict[str, Any]:
-    """Remove host-published ports from a scoped transient Compose model.
+    """Restrict a scoped transient Compose model to restore-safe lifecycle rules.
 
     The canonical restored Compose file is unchanged. Only the sealed runtime
     model used during the custom restore is restricted; every service is
-    stripped so even an unexpected Compose dependency cannot publish a port.
-    ``up --no-deps`` provides the independent service-start boundary.
+    stripped of published ports, automatic restart policies, and health checks.
+    This prevents a restore-time container crash or intentional application
+    shutdown from relaunching or externally replacing the service against
+    partially restored data. ``up --no-deps`` provides the independent
+    service-start boundary.
     """
     if restore_services is None:
         return compose_model
@@ -2044,6 +2048,20 @@ def _custom_restore_runtime_model(
     for service in (model.get("services") or {}).values():
         if isinstance(service, dict):
             service.pop("ports", None)
+            # The transient restore container must stay down after a crash. A
+            # production ``restart: always``/``unless-stopped`` policy would
+            # otherwise relaunch the application while its data is only partly
+            # restored. Explicit ``restart: no`` also overrides Compose's
+            # deploy-level fallback; remove that fallback for defense in depth.
+            service["restart"] = "no"
+            deploy = service.get("deploy")
+            if isinstance(deploy, dict):
+                deploy.pop("restart_policy", None)
+            # GitLab's documented Docker/Swarm restore procedure disables its
+            # image health check because stopping Puma is an intentional part of
+            # the import. Apply the same isolation to every scoped transient
+            # service; the canonical restored Compose file remains untouched.
+            service["healthcheck"] = {"disable": True}
     return model
 
 
@@ -2057,7 +2075,8 @@ def _confirm_custom_restore(cfg: Dict[str, Any]) -> bool:
     if restore_services is not None:
         util.warn(
             "Only these Compose services will start: %s "
-            "(--no-deps; transient published ports removed)."
+            "(--no-deps; transient published ports removed and automatic "
+            "restart policies and health checks disabled)."
             % ", ".join(restore_services)
         )
     if not util.DRY_RUN and not wizard.confirm(
@@ -2106,7 +2125,8 @@ def _custom_restore(
     else:
         util.info(
             "Starting only restore service(s) %s without dependencies or "
-            "published host ports, then running the restore command…"
+            "published host ports, and with automatic restart and health checks "
+            "disabled, then running the restore command…"
             % ", ".join(restore_services)
         )
     try:

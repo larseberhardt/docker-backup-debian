@@ -123,10 +123,27 @@ class GitlabExcludeInvariantTest(unittest.TestCase):
 
 
 class GitlabRestoreHookInvariantTest(unittest.TestCase):
+    def test_template_schema_version_remains_supported(self):
+        self.assertEqual(templates.load("gitlab")["template_schema_version"], 1)
+
     def test_restore_does_not_restart_outbound_services(self):
         command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
         self.assertIn("gitlab-backup restore", command)
         self.assertNotIn("gitlab-ctl start", command)
+
+    def test_restore_waits_for_reconfigure_and_two_health_passes(self):
+        command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
+        required = (
+            "gitlab Reconfigured!",
+            "[c]inc-client|[c]hef-client|[g]itlab-ctl reconfigure",
+            "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10",
+            "gitlab-rake gitlab:env:info",
+            'while [ "$ready_passes" -lt 2 ]',
+            "GitLab container stopped during readiness checks.",
+            "GITLAB_ASSUME_YES=1",
+        )
+        for fragment in required:
+            self.assertIn(fragment, command)
 
 
 if __name__ == "__main__":

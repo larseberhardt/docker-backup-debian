@@ -34,8 +34,10 @@ A template may additionally bind `restore_services`. That restrictive startup sc
 part of a versioned compatibility fingerprint (`sha256-v2`); templates without a scope keep
 the existing `sha256-v1` hook fingerprint byte-for-byte. During restore the listed names are
 validated against the authenticated Compose model before placement. Only those services are
-started, with `--no-deps`, and published ports are removed from the sealed transient Compose
-model. The canonical restored Compose file is not changed. An absent field retains the
+started, with `--no-deps`; published ports are removed and automatic restart policies are
+disabled in the sealed transient Compose model. Its health checks are disabled as well, so an
+intentional application shutdown cannot make an orchestrator replace it during the import.
+The canonical restored Compose file is not changed. An absent field retains the
 legacy full-stack custom-restore behavior; an explicit `null` or empty list is invalid.
 
 `restore --from-repo ... --use-template-hooks` loads only that exact local source (a
