@@ -373,7 +373,10 @@ its recent logs instead of racing reconfiguration against the destructive restor
 ports and with automatic restart and health checks disabled for the transient restore container.
 The hook deliberately does not restart Puma or Sidekiq after importing; `docker-backup`
 stops the temporary restore service in its cleanup path, avoiding even a brief window for
-restored jobs, email or webhooks to leave the drill server.
+restored jobs, email or webhooks to leave the drill server. Restore-time Compose cleanup
+allows containers up to 120 seconds to stop gracefully; process-heavy Omnibus GitLab
+shutdowns can exceed Compose's ten-second default, which would otherwise end in SIGKILL
+(exit 137) even after a successful import.
 
 Existing GitLab configs keep all previously stored settings; `docker-backup set` cannot add
 the builtin template provenance or replace the complete exclude/hook set. Before creating

@@ -41,6 +41,12 @@ _REMOTE_SCHEMES = (
     "http:", "https:",
 )
 
+# Process-heavy restore containers such as Omnibus GitLab can need materially
+# longer than Compose's ten-second default to stop cleanly.  Give them a bounded
+# grace period before Docker resorts to SIGKILL while preserving the existing
+# post-down verification below.
+RESTORE_CLEANUP_TIMEOUT_SECONDS = 120
+
 
 # --- filesystem helpers (pure) ----------------------------------------------
 def find_compose_file(stack_dir: str) -> Optional[str]:
@@ -256,8 +262,12 @@ def up_all(compose_file, project_dir, project_name=None) -> None:
 def down_all(compose_file, project_dir, project_name=None) -> None:
     """Stop/remove restore-time containers while preserving data volumes."""
     base = _base(compose_file, project_dir, project_name)
+    down_argv = base + [
+        "down", "--remove-orphans", "--timeout",
+        str(RESTORE_CLEANUP_TIMEOUT_SECONDS),
+    ]
     util.run(
-        base + ["down", "--remove-orphans"],
+        down_argv,
         mutating=True, capture=False,
     )
     if util.DRY_RUN:
@@ -268,7 +278,7 @@ def down_all(compose_file, project_dir, project_name=None) -> None:
     )
     if (remaining.stdout or "").strip():
         raise util.CommandError(
-            base + ["down", "--remove-orphans"], 1,
+            down_argv, 1,
             "Restore-time project containers remain after cleanup: %s"
             % (remaining.stdout or "").strip(),
         )

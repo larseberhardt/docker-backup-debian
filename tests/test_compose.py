@@ -107,9 +107,12 @@ class ComposeCleanupTest(unittest.TestCase):
             "docker", "compose", "-f", self.compose_file,
             "--project-directory", self.project_dir, "-p", self.project_name,
         ]
+        down_argv = base + [
+            "down", "--remove-orphans", "--timeout", "120",
+        ]
         self.assertEqual(run.call_args_list, [
             mock.call(
-                base + ["down", "--remove-orphans"],
+                down_argv,
                 mutating=True, capture=False,
             ),
             mock.call(
@@ -122,8 +125,17 @@ class ComposeCleanupTest(unittest.TestCase):
         with mock.patch.object(compose.util, "run") as run:
             run.side_effect = [self._proc(), self._proc("deadbeef\n")]
 
-            with self.assertRaises(util.CommandError):
+            with self.assertRaises(util.CommandError) as ctx:
                 compose.down_all(self.compose_file, self.project_dir, self.project_name)
+
+        base = [
+            "docker", "compose", "-f", self.compose_file,
+            "--project-directory", self.project_dir, "-p", self.project_name,
+        ]
+        self.assertEqual(
+            ctx.exception.argv,
+            base + ["down", "--remove-orphans", "--timeout", "120"],
+        )
 
     def test_rm_service_force_stops_then_verifies_no_service_container(self):
         with mock.patch.object(compose.util, "run") as run:
