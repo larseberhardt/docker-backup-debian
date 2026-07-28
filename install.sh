@@ -29,13 +29,20 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if ! command -v restic >/dev/null 2>&1; then
-  log "restic not found — installing via apt-get…"
+  log "restic not found — bootstrapping via apt-get…"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -qq && apt-get install -y restic || die "restic installation failed."
   else
     die "No apt-get available. Please install restic manually (https://restic.net)."
   fi
 fi
+
+# Debian's stable package can lag several restic releases behind. Use that
+# package only as a bootstrap, then let restic install the latest official
+# binary. self-update selects the correct architecture and verifies the
+# release's signed SHA256SUMS before replacing the current executable.
+log "Updating restic to the latest official release…"
+restic self-update || die "restic self-update failed. Check GitHub connectivity and rerun install.sh."
 log "restic: $(restic version 2>/dev/null | head -n1 || echo 'unknown')"
 
 # Safe automatic repository detection needs restic >= 0.17 (dedicated missing-repo

@@ -52,8 +52,9 @@ is done via a **systemd timer** per stack.
 
 > Python standard library only, no pip dependencies. Tested on Python 3.9 and up.
 > restic **>= 0.17** required (unambiguous missing-repository exit codes and
-> `restore --sparse`); **>= 0.19.1** recommended. `install.sh` and `doctor` warn
-> on older distro packages.
+> `restore --sparse`); **>= 0.19.1** recommended. `install.sh` upgrades older
+> distro packages to the latest official release; `doctor` warns if an older
+> binary is still active.
 
 ---
 
@@ -69,9 +70,12 @@ sudo ./install.sh
 
 The installer copies the program to `/opt/docker-backup`, creates the symlink
 `/usr/local/bin/docker-backup`, installs `restic`/`git` (if needed), the
-systemd units, and the directories under `/etc/docker-backup`. When installed from a
-git checkout, it records the origin URL in `/etc/docker-backup/update.conf`,
-so **auto-update** works right away (see [Updating](#updating)).
+systemd units, and the directories under `/etc/docker-backup`. A missing `restic`
+is bootstrapped through APT and then upgraded to the latest official release with
+restic's built-in, GPG-verified `self-update`; this also upgrades an older existing
+installation. When installed from a git checkout, it records the origin URL in
+`/etc/docker-backup/update.conf`, so **auto-update** works right away (see
+[Updating](#updating)).
 
 Automatic backup and integrity-check services use a systemd-managed restic cache at
 `/var/cache/docker-backup/restic`. This is needed by restic 0.19 and newer because
