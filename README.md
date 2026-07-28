@@ -106,7 +106,7 @@ daily (with a randomized delay) for new releases and writes the result to
 **interactively** (TTY), a one-line notice appears on stderr, e.g.:
 
 ```
-[!] Update available: docker-backup 1.0.0 → 1.1.0. Update with 'sudo docker-backup update'.
+[!] Update available: docker-backup 1.1.0 → 1.1.1. Update with 'sudo docker-backup update'.
 ```
 
 The notice itself does **no** network/git access (it only reads the cache) and can be
@@ -117,7 +117,7 @@ automatically — you start updates yourself.
 commit, then tag and push:
 
 ```bash
-git tag v1.1.0 && git push origin main --tags
+git tag v1.1.1 && git push origin main --tags
 ```
 
 ---
