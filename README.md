@@ -368,11 +368,16 @@ itself aborts a mismatched restore. The hook requires exactly one regular
 `*_gitlab_backup.tar`, derives its validated ID, and passes it as `BACKUP=...`; a stale or
 ambiguous archive set therefore fails closed. It also sets `GITLAB_ASSUME_YES=1` explicitly
 so an unattended restore cannot wait at GitLab's destructive-action prompts. On a fresh
-server it waits up to 30 minutes for Omnibus first-boot reconfiguration to report successful
-completion and for its Cinc/Chef process to exit. It then requires the image's
-`gitlab-healthcheck` and `gitlab-rake gitlab:env:info` to pass twice consecutively before
-the import. Status lines remain visible throughout, and a stopped container fails early with
-its recent logs instead of racing reconfiguration against the destructive restore. Only the
+server it waits up to 30 minutes for Omnibus first-boot reconfiguration to finish: its
+Cinc/Chef process must be absent from three consecutive in-container probes, and a probe that
+cannot run at all (a container that is up but not yet exec-ready) resets that count instead of
+opening the gate. It then requires the image's `gitlab-healthcheck` and
+`gitlab-rake gitlab:env:info` to pass twice consecutively before the import — that pair, not a
+log line, is what proves GitLab is genuinely up. Status lines remain visible throughout, and a
+stopped container fails early with its recent logs instead of racing reconfiguration against
+the destructive restore. Nothing in the wait is keyed on `docker logs` output: the container
+streams all of `/var/log/gitlab` to stdout, so any one-shot marker leaves a bounded `--tail`
+window within seconds and a gate built on one would never open. Only the
 `gitlab` Compose service is started for this hook (not Runner or DinD), without published host
 ports and with automatic restart and health checks disabled for the transient restore container.
 The hook deliberately does not restart Puma or Sidekiq after importing; `docker-backup`

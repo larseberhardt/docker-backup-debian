@@ -134,7 +134,8 @@ class GitlabRestoreHookInvariantTest(unittest.TestCase):
     def test_restore_waits_for_reconfigure_and_two_health_passes(self):
         command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
         required = (
-            "gitlab Reconfigured!",
+            '[ "$probe" = idle ]',
+            'while [ "$reconfigure_idle" -lt 3 ]',
             "[c]inc-client|[c]hef-client|[g]itlab-ctl reconfigure",
             "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10",
             "gitlab-rake gitlab:env:info",
@@ -144,6 +145,29 @@ class GitlabRestoreHookInvariantTest(unittest.TestCase):
         )
         for fragment in required:
             self.assertIn(fragment, command)
+
+    def test_restore_readiness_never_depends_on_host_log_scrollback(self):
+        """``docker logs`` may report a failure, never gate the restore.
+
+        The container streams all of ``/var/log/gitlab`` to stdout, so a
+        one-shot marker like ``gitlab Reconfigured!`` leaves any bounded
+        ``--tail`` window within seconds of GitLab coming up. A gate keyed on
+        that marker therefore never opens and the restore times out while
+        GitLab is healthy. Every ``docker logs`` call must stay a diagnostic
+        that writes to stderr in an already-failing branch.
+        """
+        command = templates.load("gitlab")["hooks"]["restore"][0]["cmd"]
+        self.assertNotIn("gitlab Reconfigured!", command)
+        self.assertNotIn("| grep", command)
+        self.assertNotIn("grep -F", command)
+        occurrences = command.count("docker logs")
+        self.assertEqual(occurrences, 4)
+        for part in command.split("docker logs")[1:]:
+            self.assertTrue(
+                part.startswith(" --tail 300 gitlab >&2 || true; exit 1;"),
+                "docker logs must only emit diagnostics on an error path, "
+                "found: %r" % part[:60],
+            )
 
 
 if __name__ == "__main__":

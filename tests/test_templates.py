@@ -144,7 +144,7 @@ class ShippedTemplatesTest(unittest.TestCase):
         self.assertIn("docker inspect -f '{{.State.Running}}' gitlab", command)
         self.assertIn("[c]inc-client|[c]hef-client|[g]itlab-ctl reconfigure", command)
         self.assertIn("docker logs --tail 300 gitlab", command)
-        self.assertIn("gitlab Reconfigured!", command)
+        self.assertIn('while [ "$reconfigure_idle" -lt 3 ]', command)
         self.assertIn(
             "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10", command,
         )
@@ -155,7 +155,7 @@ class ShippedTemplatesTest(unittest.TestCase):
         self.assertIn("GITLAB_ASSUME_YES=1", command)
         self.assertIn('BACKUP="$backup"', command)
         self.assertIn("Expected exactly one regular GitLab backup archive", command)
-        self.assertLess(command.index("gitlab Reconfigured!"),
+        self.assertLess(command.index("reconfigure_idle"),
                         command.index("gitlab-healthcheck"))
         self.assertLess(command.index("gitlab-healthcheck"),
                         command.index("gitlab-ctl stop puma"))
