@@ -71,10 +71,15 @@ sudo ./install.sh
 The installer copies the program to `/opt/docker-backup`, creates the symlink
 `/usr/local/bin/docker-backup`, installs `restic`/`git` (if needed), the
 systemd units, and the directories under `/etc/docker-backup`. A missing `restic`
-is bootstrapped through APT and then upgraded to the latest official release with
-restic's built-in, GPG-verified `self-update`; this also upgrades an older existing
-installation. When installed from a git checkout, it records the origin URL in
-`/etc/docker-backup/update.conf`, so **auto-update** works right away (see
+is bootstrapped through APT and then upgraded to the latest official release:
+via restic's built-in, GPG-verified `self-update` where available, otherwise — the
+Debian/Ubuntu packages are built without that command — via the official GitHub
+release, whose SHA256 is verified against `SHA256SUMS` before the binary is
+installed to `/usr/local/bin/restic`. This also upgrades an older existing
+installation; if GitHub is unreachable, the installer keeps the version that is
+already installed and only warns. When installed from a git checkout, it records
+the origin URL in `/etc/docker-backup/update.conf`, so **auto-update** works
+right away (see
 [Updating](#updating)).
 
 Automatic backup and integrity-check services use a systemd-managed restic cache at

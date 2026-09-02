@@ -38,17 +38,98 @@ if ! command -v restic >/dev/null 2>&1; then
 fi
 
 # Debian's stable package can lag several restic releases behind. Use that
-# package only as a bootstrap, then let restic install the latest official
-# binary. self-update selects the correct architecture and verifies the
-# release's signed SHA256SUMS before replacing the current executable.
+# package only as a bootstrap and then pull the latest official binary.
+#
+# Preferred path: restic's own self-update — it selects the architecture and
+# verifies the release's signed SHA256SUMS. Debian/Ubuntu, however, build the
+# package *without* that command (restic then reports an unknown command); in
+# that case the release is fetched from GitHub and checked against SHA256SUMS
+# here.
+
+fetch() {  # fetch <url> <dest|->
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$2" "$1"
+  else
+    return 127
+  fi
+}
+
+# True if $1 >= $2 (version sort).
+ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+install_restic_latest() {
+  local arch ver tmp base file want got cur
+
+  case "$(uname -m)" in
+    x86_64|amd64)   arch=amd64 ;;
+    aarch64|arm64)  arch=arm64 ;;
+    armv7l|armv6l)  arch=arm ;;
+    i386|i686)      arch=386 ;;
+    *) warn "Unknown architecture $(uname -m) — cannot fetch an official restic build."; return 1 ;;
+  esac
+
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get install -y curl >/dev/null 2>&1 || true
+    fi
+    command -v curl >/dev/null 2>&1 || { warn "Neither curl nor wget available."; return 1; }
+  fi
+
+  ver="$(fetch https://api.github.com/repos/restic/restic/releases/latest - 2>/dev/null \
+         | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+  [ -n "$ver" ] || { warn "Could not determine the latest restic release (GitHub unreachable?)."; return 1; }
+
+  cur="$(restic version 2>/dev/null | awk '{print $2; exit}')" || cur=""
+  if [ -n "$cur" ] && ver_ge "$cur" "$ver"; then
+    log "restic $cur is already current."
+    return 0
+  fi
+
+  tmp="$(mktemp -d)"
+  file="restic_${ver}_linux_${arch}.bz2"
+  base="https://github.com/restic/restic/releases/download/v${ver}"
+
+  if ! fetch "$base/$file" "$tmp/$file" || ! fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"; then
+    warn "Download of restic $ver failed."
+    rm -rf "$tmp"; return 1
+  fi
+
+  want="$(awk -v f="$file" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")"
+  got="$(sha256sum "$tmp/$file" | awk '{print $1}')"
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    warn "SHA256 check for $file failed — not installing this download."
+    rm -rf "$tmp"; return 1
+  fi
+
+  if command -v bunzip2 >/dev/null 2>&1; then
+    bunzip2 -c "$tmp/$file" > "$tmp/restic"
+  else
+    python3 -c 'import bz2,shutil,sys
+with bz2.open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
+    shutil.copyfileobj(src, dst)' "$tmp/$file" "$tmp/restic"
+  fi
+
+  install -m 0755 "$tmp/restic" /usr/local/bin/restic || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  hash -r
+  log "restic $ver installed to /usr/local/bin/restic."
+}
+
 log "Updating restic to the latest official release…"
-restic self-update || die "restic self-update failed. Check GitHub connectivity and rerun install.sh."
+if restic self-update --help >/dev/null 2>&1; then
+  restic self-update || warn "restic self-update failed (GitHub unreachable?) — keeping the installed version."
+else
+  install_restic_latest || warn "Could not install the latest restic — keeping the installed version."
+fi
+hash -r
 log "restic: $(restic version 2>/dev/null | head -n1 || echo 'unknown')"
 
 # Safe automatic repository detection needs restic >= 0.17 (dedicated missing-repo
 # exit code); that version also supports correct-size sparse restores. A current
 # restic is strongly recommended for restore, hard-link and metadata fixes.
-RESTIC_VER="$(restic version 2>/dev/null | awk '{print $2; exit}')"
+RESTIC_VER="$(restic version 2>/dev/null | awk '{print $2; exit}')" || RESTIC_VER=""
 if [ -n "${RESTIC_VER:-}" ]; then
   if [ "$(printf '%s\n' "$RESTIC_VER" 0.17.0 | sort -V | head -n1)" != "0.17.0" ]; then
     warn "restic $RESTIC_VER is OLDER than 0.17 — repository detection is ambiguous and safe automatic initialization is unavailable."
