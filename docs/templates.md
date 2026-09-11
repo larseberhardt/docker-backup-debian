@@ -4,7 +4,7 @@ A template is a small JSON file that pre-fills a `docker-backup create` run for 
 application (GitLab, Supabase, …). The user applies it with `--from-template <name>`, then
 refines the result. Templates are meant to be **contributed by the community via PR**.
 
-- **Shipped templates:** [`docker_backup/templates/<app>.json`](../docker_backup/templates/)
+- **Shipped templates:** [`docker_backup/templates/<app>.json`](https://github.com/larseberhardt/docker-backup-debian/tree/main/docker_backup/templates)
   (carried by `install.sh` automatically — no packaging change needed).
 - **Operator override:** `/etc/docker-backup/templates/<app>.json` (same name wins over the
   shipped one).

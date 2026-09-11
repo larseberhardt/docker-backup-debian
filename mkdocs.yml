@@ -1,0 +1,67 @@
+site_name: docker-backup
+site_description: Back up and restore complete Docker Compose stacks with restic and systemd
+site_url: https://larseberhardt.github.io/docker-backup-debian/
+repo_url: https://github.com/larseberhardt/docker-backup-debian
+repo_name: larseberhardt/docker-backup-debian
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - Quick start: quickstart.md
+      - How it works: how-it-works.md
+  - Guides:
+      - Databases: databases.md
+      - Templates & hooks: hooks.md
+      - GitLab: gitlab.md
+      - Restore: restore.md
+      - Scheduling & monitoring: operations.md
+      - Email notifications: notifications.md
+      - Key escrow & 3-2-1: keys.md
+  - Reference:
+      - Files & layout: layout.md
+      - Template reference: templates.md
+      - Development: development.md
