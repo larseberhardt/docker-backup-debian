@@ -21,6 +21,9 @@ from typing import Any, Dict, List, Optional
 from . import config, util
 
 
+SECURITY_MODES = ("starttls", "ssl", "none")
+
+
 def notify_config_path() -> str:
     return os.path.join(config.etc_dir(), "notify.json")
 
@@ -94,9 +97,21 @@ def send(subject: str, body: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
     msg.set_content(body)
 
     host = smtp.get("host")
-    port = int(smtp.get("port") or 587)
-    security = (smtp.get("security") or "starttls").lower()
-    timeout = float(smtp.get("timeout") or 30)
+    try:
+        port = int(smtp.get("port") or 587)
+        timeout = float(smtp.get("timeout") or 30)
+    except (TypeError, ValueError) as exc:
+        util.warn("Notification: invalid 'smtp.port'/'smtp.timeout' in notify.json (%s) — skipped." % exc)
+        return False
+    security = str(smtp.get("security") or "starttls").strip().lower()
+    if security not in SECURITY_MODES:
+        # Fail closed: an unknown value (typo like "startls") must not silently
+        # downgrade to a plaintext login and leak the SMTP password.
+        util.warn(
+            "Notification: unknown 'smtp.security' %r in notify.json (expected one of %s) — skipped."
+            % (security, ", ".join(SECURITY_MODES))
+        )
+        return False
     username = smtp.get("username")
     password = _smtp_password(smtp)
     if password:

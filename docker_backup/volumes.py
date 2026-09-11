@@ -110,7 +110,9 @@ def backup_named_volume(
                 "not accepted.",
             )
     except Exception:
-        if staging_fd is not None:
+        # Only remove what THIS call created (O_EXCL succeeded); a pre-existing
+        # entry that made O_EXCL fail is not ours to delete.
+        if staging_fd is not None and archive_fd >= 0:
             try:
                 os.unlink(filename, dir_fd=staging_fd)
             except OSError:

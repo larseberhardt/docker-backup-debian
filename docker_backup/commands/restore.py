@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -1015,12 +1016,16 @@ def _write_runtime_compose(
                         ),
                     )
                     if (selected_source is None
-                            and not compose.is_system_bind_source(original_source)):
+                            and not compose.is_system_bind_source(original_source)
+                            and not volume.get("read_only")):
+                        # A read-only bind (e.g. a 10 TB media library) cannot be
+                        # altered by the restored stack and is deliberately not
+                        # part of the backup → allowed as-is.
                         raise ValueError(
-                            "Unselected external bind source cannot be used by an "
-                            "automatic restore: %s. Include it in the backup or "
-                            "remove it from the restore Compose model."
-                            % original_source
+                            "Unselected writable external bind source cannot be used "
+                            "by an automatic restore: %s. Include it in the backup, "
+                            "mount it read-only, or remove it from the restore "
+                            "Compose model." % original_source
                         )
             for device in service.get("devices") or []:
                 if (isinstance(device, dict)
@@ -2144,7 +2149,13 @@ def _custom_restore(
         # Runtime sources were verified through retained descriptors before
         # startup. Remove every restore-time container before releasing those
         # verification handles; data and named volumes are retained.
-        compose.down_all(new_compose, dest, new_project)
+        try:
+            compose.down_all(new_compose, dest, new_project)
+        except util.CommandError as exc:
+            if sys.exc_info()[0] is None:
+                raise
+            util.error("Stack teardown failed after the restore error (original "
+                       "error kept): %s" % (exc.stderr or exc))
     util.info("Custom restore command to %s complete." % (display_dest or dest))
     return True
 
@@ -2432,13 +2443,11 @@ def _restore_extra_paths(
                         )
                         continue
                     raise
-                if not force and not guard_created:
-                    util.warn(
-                        "External target %s already exists — NOT overwritten "
-                        "(--force clean-replaces it)." % target
-                    )
-                    continue
-                if not guard_created:
+                # _reserve_restore_directory raised above unless the existing
+                # directory was empty (or --force): an empty mountpoint is the
+                # normal shape of an external target and is filled like the
+                # main stack target.
+                if not guard_created and force:
                     util.warn(
                         "External target %s exists — clean-replacing it from the snapshot "
                         "(--force)." % target
@@ -2838,7 +2847,13 @@ def _import_databases(
             finally:
                 # Fully stop the stack even when import fails (data is preserved). A
                 # failed restore must not leave a partially imported DB serving traffic.
-                compose.rm_service(new_compose, dest, db["service"], new_project)
+                try:
+                    compose.rm_service(new_compose, dest, db["service"], new_project)
+                except util.CommandError as exc:
+                    if sys.exc_info()[0] is None:
+                        raise
+                    util.error("Stopping '%s' failed after the import error (original "
+                               "error kept): %s" % (db["service"], exc.stderr or exc))
     finally:
         if dumps_fd >= 0:
             os.close(dumps_fd)
@@ -3650,7 +3665,10 @@ def _remove_entry_at(
             finally:
                 os.close(child_fd)
         os.unlink(name, dir_fd=parent_fd)
-    elif stat.S_ISLNK(info.st_mode):
+    elif (stat.S_ISLNK(info.st_mode) or stat.S_ISSOCK(info.st_mode)
+            or stat.S_ISFIFO(info.st_mode)):
+        # Unix sockets/FIFOs are ordinary leftovers of a stopped stack
+        # (.s.PGSQL.5432, gitaly.socket, mysqld.sock); unlinkat never opens them.
         os.unlink(name, dir_fd=parent_fd)
     else:
         raise ValueError("Refusing to replace special target entry: %s" % name)
@@ -3820,8 +3838,19 @@ def _copy_fd_metadata(source_fd: int, target_fd: int) -> None:
         os.fchown(target_fd, info.st_uid, info.st_gid)
     os.fchmod(target_fd, stat.S_IMODE(info.st_mode))
     if all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")):
-        for attribute in os.listxattr(source_fd):
-            os.setxattr(target_fd, attribute, os.getxattr(source_fd, attribute))
+        try:
+            attributes = os.listxattr(source_fd)
+        except OSError:
+            attributes = []
+        for attribute in attributes:
+            try:
+                os.setxattr(target_fd, attribute, os.getxattr(source_fd, attribute))
+            except OSError as exc:
+                # Like shutil.copystat: security.*/system.*/trusted.* attributes a
+                # target filesystem does not support are not worth a failed restore.
+                if exc.errno not in (errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+                                     errno.ENODATA, errno.EINVAL, errno.EPERM, errno.EACCES):
+                    raise
     os.utime(target_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
 
 

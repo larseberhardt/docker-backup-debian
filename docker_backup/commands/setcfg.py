@@ -7,6 +7,8 @@ only with an explicit ``--i-know-this-orphans-the-old-repo``.
 
 from __future__ import annotations
 
+import os
+
 from typing import Dict
 
 from .. import compose, config, hooks, restic, systemd_units, util
@@ -145,6 +147,7 @@ def _cmd_set_locked(args, name: str) -> int:
         changed = True
     keep_within = getattr(args, "keep_within", None)
     if keep_within is not None:
+        keep_within = restic.validate_keep_within(keep_within)
         cfg.setdefault("retention", dict(config.DEFAULT_RETENTION))["keep_within"] = keep_within
         changed = True
 
@@ -208,7 +211,10 @@ def _cmd_set_locked(args, name: str) -> int:
             changed = True
 
     if args.offsite is not None:
-        cfg["offsite"] = compose.repo_for(args.offsite, name) if args.offsite else None
+        offsite = args.offsite
+        if offsite and compose.is_local_repo(offsite):
+            offsite = os.path.abspath(offsite)  # the timer runs with cwd '/'
+        cfg["offsite"] = compose.repo_for(offsite, name) if offsite else None
         changed = True
 
     if getattr(args, "refresh_db_detection", False):
@@ -278,8 +284,11 @@ def _cmd_set_locked(args, name: str) -> int:
                 "--i-know-this-orphans-the-old-repo."
             )
             return 2
-        cfg["repo"] = compose.repo_for(args.target, name)
-        cfg["mount_check"] = args.target if compose.is_local_repo(args.target) else None
+        target = args.target
+        if compose.is_local_repo(target):
+            target = os.path.abspath(target)  # the timer runs with cwd '/'
+        cfg["repo"] = compose.repo_for(target, name)
+        cfg["mount_check"] = target if compose.is_local_repo(target) else None
         changed = True
         util.warn("Repo target changed to %s. The old repo is left untouched; a new one "
                   "is initialized on the next run." % cfg["repo"])

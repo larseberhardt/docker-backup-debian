@@ -92,6 +92,24 @@ def validate_exclude_pattern(pattern: str) -> str:
     return p
 
 
+_KEEP_WITHIN_RE = re.compile(r"^(\d+y)?(\d+m)?(\d+d)?(\d+h)?$")
+
+
+def validate_keep_within(value: str) -> str:
+    """Validates a ``--keep-within`` duration (restic syntax, e.g. ``30d``, ``1y2m``).
+
+    A typo would otherwise only surface when ``restic forget`` fails AFTER every
+    successful backup — the run would then be red forever."""
+    v = (value or "").strip()
+    if not v or not _KEEP_WITHIN_RE.match(v):
+        raise util.CommandError(
+            ["--keep-within"], 2,
+            "Invalid --keep-within %r: expected a restic duration such as "
+            "'30d', '2m', '1y6m' or '36h'." % value,
+        )
+    return v
+
+
 # --- argv builders (pure) ---------------------------------------------------
 def base_args(repo: str, key_file: str) -> List[str]:
     return ["restic", "-r", repo, "--password-file", key_file]
@@ -287,16 +305,23 @@ def backup(repo, key_file, paths, excludes, tags) -> Optional[str]:
 
     snapshot_id = None  # type: Optional[str]
     assert proc.stdout is not None
-    for line in proc.stdout:
-        # --json is deliberately still visible: status messages arrive while a
-        # large backup runs rather than appearing only after it completes.
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        parsed = _snapshot_id_from_backup_message(line)
-        if parsed is not None:
-            snapshot_id = parsed
-
-    returncode = proc.wait()
+    try:
+        for line in proc.stdout:
+            # --json is deliberately still visible: status messages arrive while a
+            # large backup runs rather than appearing only after it completes.
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            parsed = _snapshot_id_from_backup_message(line)
+            if parsed is not None:
+                snapshot_id = parsed
+        returncode = proc.wait()
+    except BaseException:
+        # Ctrl-C / broken stdout / unexpected error: do not leave restic running
+        # detached (it would keep the repository lock and write a snapshot the
+        # caller never learns about).
+        proc.kill()
+        proc.wait()
+        raise
     if returncode != 0:
         raise util.CommandError(argv, returncode)
     return snapshot_id

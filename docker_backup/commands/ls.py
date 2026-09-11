@@ -36,8 +36,8 @@ def cmd_ls(args) -> int:
         if show_snap:
             snap = "-"
             if cfg.get("key_file"):
-                runtime.load_backend_env(cfg)
-                s = restic.last_snapshot(repo, cfg["key_file"])
+                with runtime.backend_env(cfg):
+                    s = restic.last_snapshot(repo, cfg["key_file"])
                 if s:
                     snap = str(s.get("time", "-"))
             row = row + (snap,)

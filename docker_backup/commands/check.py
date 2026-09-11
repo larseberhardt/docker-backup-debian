@@ -80,11 +80,11 @@ def _check_one(name: str, subset: Optional[str]) -> Tuple[bool, str]:
     repo, key = cfg.get("repo"), cfg.get("key_file")
     if not repo or not key:
         return (False, "Repo/key missing in config")
-    runtime.load_backend_env(cfg)
     if util.DRY_RUN:
         util.info("DRY-RUN: would run 'restic check' for %s." % repo)
         return (True, "dry-run")
-    problems = _check_repos(cfg, key, subset)
+    with runtime.backend_env(cfg):
+        problems = _check_repos(cfg, key, subset)
     return (not problems, "; ".join(problems))
 
 
@@ -120,13 +120,13 @@ def _refresh_cache(subset: Optional[str]) -> int:
             worst = 1
             continue
         repo, key = cfg.get("repo"), cfg.get("key_file")
-        runtime.load_backend_env(cfg)
         if not repo or not key:
             results[n] = {"status": "error", "checked_at": _utcnow(),
                           "error": "Repo/key missing in config"}
             worst = 1
             continue
-        problems = _check_repos(cfg, key, subset)
+        with runtime.backend_env(cfg):
+            problems = _check_repos(cfg, key, subset)
         if not problems:
             results[n] = {"status": "ok", "checked_at": _utcnow(), "error": None}
             continue

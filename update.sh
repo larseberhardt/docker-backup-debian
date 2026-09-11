@@ -49,6 +49,16 @@ ensure_git() {
   fi
 }
 
+# git ls-remote has no timeout of its own: an unreachable/hanging git host must
+# not block install.sh or the daily timer indefinitely.
+git_ls_remote_tags() {  # <url>
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 120 git ls-remote --tags --refs "$1"
+  else
+    git ls-remote --tags --refs "$1"
+  fi
+}
+
 # --- Version helpers --------------------------------------------------------
 version_from_file() {
   grep -E '^__version__' "$1" 2>/dev/null | head -n1 \
@@ -136,7 +146,7 @@ PY
 do_refresh() {
   local installed tags_output latest_tag latestver behind prev
   installed="$(installed_version)"
-  if ! tags_output="$(git ls-remote --tags --refs "$REMOTE_URL" 2>/dev/null)"; then
+  if ! tags_output="$(git_ls_remote_tags "$REMOTE_URL" 2>/dev/null)"; then
     prev="$(cache_get latest_version)"
     write_cache "${prev:-}" 0 "fetch_failed" "$installed"
     return 1
@@ -262,7 +272,7 @@ case "$MODE" in
     ensure_git
 
     INSTALLED="$(installed_version)"
-    TAGS="$(git ls-remote --tags --refs "$REMOTE_URL" 2>/dev/null)" \
+    TAGS="$(git_ls_remote_tags "$REMOTE_URL" 2>/dev/null)" \
       || die "git ls-remote failed — check network/URL ($REMOTE_URL)."
     LATEST_TAG="$(highest_tag_from "$TAGS" || true)"
     [ -n "$LATEST_TAG" ] || die "No release tags (vX.Y.Z) found in the repo."
@@ -300,6 +310,6 @@ case "$MODE" in
     log "Starting installation from $REPO_DIR…"
     # exec: replaces this process; install.sh runs from the freshly fetched
     # checkout and overwrites /opt, never the file currently running.
-    exec "$REPO_DIR/install.sh"
+    exec bash "$REPO_DIR/install.sh"
     ;;
 esac

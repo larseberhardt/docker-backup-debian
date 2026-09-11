@@ -182,8 +182,22 @@ def validate(t: Dict[str, Any]) -> Dict[str, Any]:
     if unknown:
         raise util.CommandError(["template"], 2,
                                 "Unknown template fields: %s" % ", ".join(sorted(unknown)))
+    if t.get("exclude_patterns") is not None and not isinstance(t["exclude_patterns"], list):
+        raise util.CommandError(["template"], 2, "'exclude_patterns' must be a list.")
     for p in (t.get("exclude_patterns") or []):
+        if not isinstance(p, str):
+            raise util.CommandError(["template"], 2, "Exclude patterns must be strings.")
         restic.validate_exclude_pattern(p)  # rejects '..'/empty
+    match = t.get("match")
+    if match is not None:
+        if not isinstance(match, dict):
+            raise util.CommandError(["template"], 2, "'match' must be an object.")
+        tokens = match.get("image_tokens")
+        if tokens is not None and (
+                not isinstance(tokens, list)
+                or not all(isinstance(tok, str) for tok in tokens)):
+            raise util.CommandError(["template"], 2,
+                                    "'match.image_tokens' must be a list of strings.")
     _validate_retention(t.get("retention"))
     _validate_hooks(t.get("hooks"))
     _validate_restore_services(
@@ -220,6 +234,13 @@ def _validate_hooks(hk: Any) -> None:
         for h in items:
             if not isinstance(h, dict) or not h.get("cmd"):
                 raise util.CommandError(["template"], 2, "Hook in '%s' needs a 'cmd'." % phase)
+            if not isinstance(h["cmd"], str):
+                raise util.CommandError(["template"], 2, "Hook 'cmd' must be a string.")
+            timeout = h.get("timeout")
+            if timeout is not None and (
+                    not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0):
+                raise util.CommandError(["template"], 2,
+                                        "Hook 'timeout' must be a positive integer (seconds).")
             bad = set(h.keys()) - _ALLOWED_HOOK_KEYS
             if bad:
                 raise util.CommandError(["template"], 2,

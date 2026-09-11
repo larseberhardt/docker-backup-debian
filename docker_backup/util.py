@@ -162,6 +162,10 @@ def run(
         )
     except FileNotFoundError as exc:
         raise CommandError(argv, 127, str(exc))
+    except subprocess.TimeoutExpired as exc:
+        # Uniform failure type: callers (hooks with on_failure=warn, finally
+        # blocks) handle CommandError, not a bare TimeoutExpired.
+        raise CommandError(argv, 124, "timed out after %ss" % exc.timeout)
 
     if check and proc.returncode != 0:
         raise CommandError(argv, proc.returncode, proc.stderr or "")

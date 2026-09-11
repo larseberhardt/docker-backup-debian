@@ -135,8 +135,21 @@ def running_writable_bind_mounts_overlapping(path: str) -> List[Dict[str, str]]:
         )
     inspected = util.run(
         ["docker", "container", "inspect"] + ids,
-        capture=True,
+        capture=True, check=False,
     )
+    if inspected.returncode != 0:
+        # A container that exited between 'ls' and 'inspect' (cron job, restart)
+        # yields rc=1 plus "No such container" while the JSON for the others is
+        # still complete. It cannot hold a writable bind any more → ignore it.
+        leftover = [
+            line for line in (inspected.stderr or "").splitlines()
+            if line.strip() and "No such container" not in line
+        ]
+        if leftover:
+            raise util.CommandError(
+                ["docker", "container", "inspect"], inspected.returncode,
+                "\n".join(leftover),
+            )
     try:
         containers = json.loads(inspected.stdout or "[]")
     except json.JSONDecodeError as exc:

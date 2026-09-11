@@ -143,6 +143,18 @@ def begin(cfg: Dict[str, Any], cj: Optional[Dict[str, Any]]) -> List[Dict[str, A
         cj = compose.config_json(compose_file, stack, project)
 
     locked = []  # type: List[Dict[str, Any]]
+    try:
+        _begin_entries(cfg, cj, entries, compose_file, stack, project, locked)
+    except BaseException:
+        # A later service failed (or Ctrl-C): release what is already frozen,
+        # otherwise those MongoDB instances stay write-locked.
+        if locked:
+            release(cfg, locked)
+        raise
+    return locked
+
+
+def _begin_entries(cfg, cj, entries, compose_file, stack, project, locked) -> None:
     for e in entries:
         svc = e["service"]
         if not compose.service_running(compose_file, stack, svc, project):
@@ -174,7 +186,6 @@ def begin(cfg: Dict[str, Any], cj: Optional[Dict[str, Any]]) -> List[Dict[str, A
             except util.CommandError:
                 util.warn("BGSAVE on '%s' failed — the existing (older) RDB is backed "
                           "up instead." % svc)
-    return locked
 
 
 def release(cfg: Dict[str, Any], locked: List[Dict[str, Any]],

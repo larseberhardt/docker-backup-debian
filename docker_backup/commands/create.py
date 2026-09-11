@@ -169,10 +169,13 @@ def create_one(
 
     user_excludes = [restic.validate_exclude_pattern(p) for p in (exclude_patterns or [])]
 
-    retention = dict(retention_override or config.DEFAULT_RETENTION)
+    # Merge over the defaults: a partial template retention (e.g. only
+    # keep_within) must not turn the missing counts into --keep-daily 0.
+    retention = dict(config.DEFAULT_RETENTION)
+    retention.update(retention_override or {})
     retention.setdefault("keep_within", None)
     if keep_within:
-        retention["keep_within"] = keep_within
+        retention["keep_within"] = restic.validate_keep_within(keep_within)
 
     hooks_dict = {"pre_backup": [], "post_backup": [], "restore": []}
     if hooks_override:  # from a template
@@ -227,6 +230,10 @@ def create_one(
     if not target_base:
         util.error("No backup target given.")
         return 1
+    # The timer runs with cwd '/', so a relative local path would resolve to a
+    # different repo there than in this shell. Store it absolute.
+    if compose.is_local_repo(target_base):
+        target_base = os.path.abspath(target_base)
     repo = compose.repo_for(target_base, name)
     mount_check = target_base if compose.is_local_repo(target_base) else None
 
@@ -234,6 +241,8 @@ def create_one(
     if offsite is None and interactive:
         off = wizard.prompt("Offsite target for 3-2-1 (empty = none)", default="")
         offsite = off or None
+    if offsite and compose.is_local_repo(offsite):
+        offsite = os.path.abspath(offsite)
     offsite_repo = compose.repo_for(offsite, name) if offsite else None
 
     # --- Frequency ---
@@ -272,6 +281,15 @@ def create_one(
         oncalendar=oncalendar,
         mount_check=mount_check,
     )
+
+    if util.DRY_RUN:
+        # Nothing below may touch /etc/docker-backup or systemd in dry-run mode
+        # (key, config, DB password sidecar, timer).
+        util.info("DRY-RUN: would write config '%s' (repo %s%s) and install the "
+                  "timer (OnCalendar=%s)."
+                  % (name, repo, (", offsite %s" % offsite_repo) if offsite_repo else "",
+                     oncalendar))
+        return 0
 
     config.ensure_dirs()
     create_new = not config_was_present and not force
@@ -413,7 +431,8 @@ def _resolve_password_source(name, dbs, creds, interactive) -> str:
             "DB password for %s (user %s, empty = skip)" % (dbs["service"], creds["user"])
         )
         if pw:
-            config.save_secret(name, dbs["service"], pw)
+            if not util.DRY_RUN:
+                config.save_secret(name, dbs["service"], pw)
             return "stored"
     else:
         util.warn("DB password for '%s' unknown; backup will attempt login without a password." % dbs["service"])
@@ -520,8 +539,11 @@ def _create_all_wizard(args, interactive: bool) -> int:
             skipped.append(name)
             continue
         try:
-            rc = create_one(stack_dir, target_base=None, schedule_input=None, offsite=None,
-                            name=name, force=args.force, interactive=True,
+            # Pass the CLI defaults through: with --non-interactive (no --auto) the
+            # wizard would otherwise prompt per stack and fail on EOF.
+            rc = create_one(stack_dir, target_base=args.target,
+                            schedule_input=args.schedule, offsite=args.offsite,
+                            name=name, force=args.force, interactive=interactive,
                             dump_user=getattr(args, "dump_user", None),
                             dump_globals=getattr(args, "dump_globals", None),
                             db_autodetect=(getattr(args, "db_autodetect", None) is not False),

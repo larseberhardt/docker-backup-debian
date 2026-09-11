@@ -8,6 +8,7 @@ import errno
 import fnmatch
 import os
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -59,6 +60,14 @@ def _run_one(name: str) -> int:
             duration_sec=round(time.monotonic() - t0, 1),
             error=util.scrub(str(exc))[:500],
         )
+        # Under systemd the OnFailure= unit sends the failure mail (also on
+        # crash/timeout). A manual or 'run --all' invocation has no such hook,
+        # so send it here — but never twice.
+        if not os.environ.get("INVOCATION_ID"):
+            try:
+                notify.notify_failure(name)
+            except Exception as nexc:
+                util.warn("Failure notification failed: %s" % nexc)
         raise
     status.write_status(
         name, result="success", started_at=started_at, finished_at=_utcnow(),
@@ -286,7 +295,15 @@ def _do_run(cfg: Dict[str, Any]) -> str:
         finally:
             # Staging holds plaintext DB dumps → remove it even when the run failed
             # (previously only on success, leaving dumps behind until the next run).
-            _cleanup_staging(staging_refs)
+            # A cleanup error must not replace the real backup error in the
+            # status file / journal / mail, so it is only logged in that case.
+            try:
+                _cleanup_staging(staging_refs)
+            except util.CommandError as exc:
+                if sys.exc_info()[0] is None:
+                    raise
+                util.error("Staging cleanup failed (original error kept): %s"
+                           % (exc.stderr or exc))
 
     util.info("Backup of '%s' complete." % name)
 

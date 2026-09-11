@@ -88,31 +88,35 @@ install_restic_latest() {
   fi
 
   tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
   file="restic_${ver}_linux_${arch}.bz2"
   base="https://github.com/restic/restic/releases/download/v${ver}"
 
   if ! fetch "$base/$file" "$tmp/$file" || ! fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"; then
     warn "Download of restic $ver failed."
-    rm -rf "$tmp"; return 1
+    return 1
   fi
 
   want="$(awk -v f="$file" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")"
   got="$(sha256sum "$tmp/$file" | awk '{print $1}')"
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
     warn "SHA256 check for $file failed — not installing this download."
-    rm -rf "$tmp"; return 1
+    return 1
   fi
 
   if command -v bunzip2 >/dev/null 2>&1; then
-    bunzip2 -c "$tmp/$file" > "$tmp/restic"
+    bunzip2 -c "$tmp/$file" > "$tmp/restic" || { warn "Could not unpack $file."; return 1; }
   else
     python3 -c 'import bz2,shutil,sys
 with bz2.open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
-    shutil.copyfileobj(src, dst)' "$tmp/$file" "$tmp/restic"
+    shutil.copyfileobj(src, dst)' "$tmp/$file" "$tmp/restic" || { warn "Could not unpack $file."; return 1; }
   fi
+  # A truncated/garbage download must not replace a working binary.
+  [ -s "$tmp/restic" ] && "$tmp/restic" version >/dev/null 2>&1 \
+    || { warn "Downloaded restic binary does not run — keeping the installed version."; return 1; }
 
-  install -m 0755 "$tmp/restic" /usr/local/bin/restic || { rm -rf "$tmp"; return 1; }
-  rm -rf "$tmp"
+  install -m 0755 "$tmp/restic" /usr/local/bin/restic || return 1
   hash -r
   log "restic $ver installed to /usr/local/bin/restic."
 }
@@ -157,9 +161,19 @@ fi
 # --- Install program --------------------------------------------------------
 log "Installing program to $PREFIX"
 mkdir -p "$PREFIX"
-# Copy only program parts (no tests/plan/.git)
-rm -rf "$PREFIX/docker_backup"
-cp -a "$SRC_DIR/docker_backup" "$PREFIX/docker_backup"
+# Copy only program parts (no tests/plan/.git). Stage the package next to
+# its final location and swap it in with two renames: a systemd backup run
+# that starts in the meantime then finds either the old or the new package,
+# never a half-copied one.
+rm -rf "$PREFIX/docker_backup.new" "$PREFIX/docker_backup.old"
+cp -a "$SRC_DIR/docker_backup" "$PREFIX/docker_backup.new"
+# Bytecode caches from the checkout belong to another interpreter/host.
+find "$PREFIX/docker_backup.new" -name '__pycache__' -type d -prune -exec rm -rf {} +
+if [ -d "$PREFIX/docker_backup" ]; then
+  mv "$PREFIX/docker_backup" "$PREFIX/docker_backup.old"
+fi
+mv "$PREFIX/docker_backup.new" "$PREFIX/docker_backup"
+rm -rf "$PREFIX/docker_backup.old"
 mkdir -p "$PREFIX/bin"
 cp -a "$SRC_DIR/bin/docker-backup" "$PREFIX/bin/docker-backup"
 cp -a "$SRC_DIR/README.md" "$PREFIX/README.md" 2>/dev/null || true

@@ -31,7 +31,11 @@ def cmd_remove(args) -> int:
             return 0
 
     # 1) Stop + disable the timer, remove the drop-in
-    systemd_units.disable_timer(name)
+    try:
+        systemd_units.disable_timer(name)
+    except util.CommandError as exc:
+        # e.g. template unit not installed (reinstall/container): still remove the config.
+        util.warn("Timer could not be disabled (%s) — continuing with the removal." % exc)
     _rmtree(systemd_units.dropin_dir(name))
     systemd_units.daemon_reload()
 

@@ -21,7 +21,7 @@ def _list() -> int:
     rows = []
     for n in names:
         try:
-            desc = templates.load(n).get("description", "")
+            desc = str(templates.load(n).get("description") or "")
         except util.CommandError as exc:
             desc = "(invalid: %s)" % exc
         rows.append((n, desc[:70]))

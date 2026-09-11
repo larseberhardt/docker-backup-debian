@@ -84,8 +84,10 @@ def _check_one(name: str) -> Tuple[Tuple[Any, ...], int]:
     repo = cfg.get("repo", "-")
     repo_col = "?"
     try:
-        runtime.load_backend_env(cfg)
-        if key_file and os.path.exists(key_file) and restic.repo_initialized(repo, key_file):
+        with runtime.backend_env(cfg):
+            reachable = (key_file and os.path.exists(key_file)
+                         and restic.repo_initialized(repo, key_file))
+        if reachable:
             repo_col = "reachable"
         else:
             repo_col = "missing"

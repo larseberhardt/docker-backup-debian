@@ -12,6 +12,9 @@ from .. import config, keys, util
 
 
 def cmd_key(args) -> int:
+    # See notify.cmd_notify: explicit dispatch guards against bpo-45235.
+    if getattr(args, "key_action", None) == "show":
+        return cmd_show(args)
     util.error("Please specify an action: show <name>")
     return 1
 

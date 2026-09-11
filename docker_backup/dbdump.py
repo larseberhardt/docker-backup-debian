@@ -77,7 +77,12 @@ def _mysql_dump_cmd(tool, auth_user, all_databases, databases, with_events):
                 [tool, "--databases"], 2,
                 "A scoped MySQL dump requires at least one database.",
             )
-        cmd += ["--databases"] + (databases or [])
+        if any(not isinstance(d, str) or not d or d.startswith("-") for d in databases):
+            raise util.CommandError(
+                [tool, "--databases"], 2,
+                "Invalid MySQL database name in config: %r" % (databases,),
+            )
+        cmd += ["--databases"] + list(databases)
     return cmd
 
 
@@ -612,7 +617,7 @@ def _import_globals(argv: List[str], globals_path: str) -> None:
         return
     with _open_regular_dump(globals_path) as fh:
         proc = util.run(argv, stdin=fh, text=True, capture=True, check=False, mutating=False)
-    problems = _scan_import_errors(getattr(proc, "stderr", "") or "")
+    problems = _problems_of(proc)
     if problems:
         util.warn("Globals import reported %d unexpected error(s) (check roles/privileges):"
                   % len(problems))
@@ -634,7 +639,22 @@ def _import_file_lenient(argv: List[str], dump_path: str) -> List[str]:
         return []
     with _open_regular_dump(dump_path) as fh:
         proc = util.run(argv, stdin=fh, text=True, capture=True, check=False, mutating=False)
-    return _scan_import_errors(getattr(proc, "stderr", "") or "")
+    return _problems_of(proc)
+
+
+def _problems_of(proc) -> List[str]:
+    """Unexpected error lines of an import run — PLUS the exit code.
+
+    stderr scanning alone is blind to failures whose message lacks the word
+    "error" (Compose: "service is not running"; a psql killed by the OOM
+    killer prints nothing at all). Such a run must never count as clean."""
+    problems = _scan_import_errors(getattr(proc, "stderr", "") or "")
+    rc = getattr(proc, "returncode", 0)
+    if rc != 0:
+        tail = (getattr(proc, "stderr", "") or "").strip().splitlines()
+        detail = tail[-1].strip() if tail else "(no stderr)"
+        problems.insert(0, "psql exited with rc=%s: %s" % (rc, detail[:200]))
+    return problems
 
 
 def _import_mysql(db, password, compose_file, project_dir, project_name, dump_path) -> None:
@@ -664,7 +684,7 @@ def _ensure_database(db, user, env, dbname, compose_file, project_dir, project_n
     # Do NOT swallow other errors (permission denied, disk full) — warn visibly;
     # the following strict import will then fail loudly anyway.
     if not util.DRY_RUN and getattr(proc, "returncode", 0) != 0:
-        for line in _scan_import_errors(getattr(proc, "stderr", "") or ""):
+        for line in _problems_of(proc):
             util.warn("CREATE DATABASE %s: %s" % (dbname, line))
 
 

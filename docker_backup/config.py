@@ -208,6 +208,10 @@ def list_configs() -> List[Dict[str, Any]]:
 
 # --- DB password sidecars (only if entered interactively) -------------------
 def secret_path(name: str, service: str) -> str:
+    service = (service or "").strip()
+    if (not service or os.sep in service or "/" in service or "\0" in service
+            or service in (".", "..")):
+        raise ValueError("Invalid service name for secret file: %r" % service)
     return os.path.join(secrets_dir(), "%s-%s.pw" % (sanitize_name(name), service))
 
 

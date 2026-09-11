@@ -51,6 +51,8 @@ log "Removing program and symlink…"
 rm -f "$BIN_LINK"
 rm -rf "$PREFIX"
 rm -f "$COMPLETION"
+# Runtime state created by the units/runs (lock files, restic cache).
+rm -rf /run/docker-backup /var/cache/docker-backup
 
 # --- /etc/docker-backup: only after confirmation (contains keys!) -----------
 if [ -d "$ETC_DIR" ]; then

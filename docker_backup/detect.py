@@ -243,7 +243,11 @@ def extract_credentials(
         random_value, _random_key = _mysql_env_value(
             env, "MYSQL_RANDOM_ROOT_PASSWORD", "MARIADB_RANDOM_ROOT_PASSWORD", flavor,
         )
-        random_root = _truthy(random_value or "")
+        # The official mysql/mariadb entrypoints enable the random root password
+        # for ANY non-empty value ([ -n "$MYSQL_RANDOM_ROOT_PASSWORD" ]), not only
+        # for 1/true/yes — mirror that, or root would be tried with a password
+        # that was never applied.
+        random_root = bool(str(random_value or "").strip())
         app_user, _app_user_key = _mysql_env_value(
             env, "MYSQL_USER", "MARIADB_USER", flavor,
         )

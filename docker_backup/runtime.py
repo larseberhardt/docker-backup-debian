@@ -4,8 +4,9 @@ loading backend credentials and resolving DB passwords.
 
 from __future__ import annotations
 
+import contextlib
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from . import compose, config, util
 
@@ -34,6 +35,23 @@ def load_backend_env(cfg: Dict[str, Any]) -> None:
         os.environ[k] = v
         if any(t in k.upper() for t in ("KEY", "SECRET", "PASSWORD", "TOKEN")):
             util.register_secret(v)
+
+
+@contextlib.contextmanager
+def backend_env(cfg: Dict[str, Any]) -> Iterator[None]:
+    """Loads the backend credentials for the duration of the block only.
+
+    Commands that iterate over several stacks (check --all, doctor, ls) would
+    otherwise let stack B without its own env file inherit stack A's
+    AWS_*/RESTIC_* variables from os.environ.
+    """
+    saved = dict(os.environ)
+    load_backend_env(cfg)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 def resolve_password(

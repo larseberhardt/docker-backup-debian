@@ -299,3 +299,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         util.error("Aborted.")
         return 130
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        # Typical causes: missing/unreadable file, permission denied, invalid
+        # name. Under --verbose the traceback stays available for bug reports.
+        if util.VERBOSE:
+            raise
+        util.error("%s: %s (re-run with -v for a traceback)" % (type(exc).__name__, exc))
+        return 1
