@@ -338,6 +338,7 @@ def _dump_one(cfg, db, cj, dumps_dir, *, dumps_fd=None) -> None:
                 "them after temporarily starting service '%s'." % db["service"]
             )
             return
+        _verify_postgres_ownership(cfg, db, password, started)
         dbdump.dump(
             db, password, compose_file, stack, project, dumps_dir,
             dumps_fd=dumps_fd,
@@ -365,6 +366,53 @@ def _extra_paths(cfg: Dict[str, Any]) -> List[str]:
             % ", ".join(missing),
         )
     return extra
+
+
+def _verify_postgres_ownership(
+    cfg: Dict[str, Any], db: Dict[str, Any], password: Any, started: bool,
+) -> None:
+    """Refuse a ``--no-owner`` dump that would not restore object ownership.
+
+    Such a dump replays every object as the importing (dump) role. A stack whose
+    application connects as a separate role then restores "successfully", but the
+    app can no longer migrate or write its own schema. Ownership survives only with
+    the ownership-preserving dump (``dump_globals``), so fail loudly and name the
+    fix instead of producing snapshots that restore wrong.
+    """
+    if (db.get("engine") != "postgres" or db.get("dump_globals")
+            or not cfg.get("pg_owner_check", True)):
+        return
+    if util.DRY_RUN and started:
+        util.info("DRY-RUN: would check Postgres object ownership in service '%s'."
+                  % db["service"])
+        return
+    foreign = dbdump.postgres_foreign_owners(
+        db, password, cfg["compose_file"], cfg["stack_path"], cfg.get("project_name"),
+    )
+    if not foreign:
+        return
+    message = ownership_loss_message(cfg.get("name") or "<name>", db, foreign)
+    if util.DRY_RUN:
+        util.warn(message)
+        return
+    raise util.CommandError(["backup", "pg-ownership"], 1, message)
+
+
+def ownership_loss_message(name: str, db: Dict[str, Any], foreign: List[Any]) -> str:
+    owners = ", ".join(
+        "%s: %s (%d object%s)" % (dbname, role, count, "" if count == 1 else "s")
+        for dbname, role, count in foreign
+    )
+    user = db.get("auth_user")
+    return (
+        "Postgres service '%s' has objects not owned by the dump role '%s' [%s]. "
+        "The portable --no-owner dump would restore all of them as '%s', so an app "
+        "connecting as another role fails after a restore (e.g. 'permission denied "
+        "for schema'). Preserve ownership and roles (needs a superuser dump role): "
+        "docker-backup set %s --dump-globals. To accept the ownership loss "
+        "deliberately: docker-backup set %s --no-owner-check"
+        % (db["service"], user, owners, user, name, name)
+    )
 
 
 def _verify_mysql_db_scope(cfg: Dict[str, Any], cj: Dict[str, Any]) -> None:

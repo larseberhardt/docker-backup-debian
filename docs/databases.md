@@ -79,6 +79,37 @@ On restore, each database is created if missing and imported **atomically**
 (`psql --single-transaction -v ON_ERROR_STOP=1`), so a failed import rolls back
 instead of leaving a half-restored database.
 
+### Object ownership (separate app role)
+
+A `--no-owner` dump is imported as the dump role, so **every restored object is
+owned by that role**. That is fine when the app connects as `POSTGRES_USER`. It
+breaks stacks where an init script creates a separate, least-privilege app role
+that owns its schema: the restore reports success, but the app then fails with
+e.g. `permission denied for schema drizzle` on its next migration.
+
+Before every Postgres dump without globals, `run` therefore checks the owners of
+all schemas, tables, views, sequences, types and functions (extension members and
+schema `public` excluded). If any belongs to a role other than the dump role, the
+backup **fails** and names the roles and the fix:
+
+```bash
+sudo docker-backup set myapp --dump-globals   # keep owners + roles (superuser dump role)
+sudo docker-backup run myapp
+```
+
+With `--dump-globals`, roles and their passwords are restored first and the dump
+keeps `OWNER`/`GRANT`; roles already created by the target's init scripts are
+tolerated. `create` enables this automatically when the DB is running and the
+check finds such objects. To accept the ownership loss deliberately (e.g. a
+non-superuser dump role that cannot read role passwords):
+
+```bash
+sudo docker-backup set myapp --no-owner-check
+```
+
+Snapshots taken before `--dump-globals` was enabled still restore with the dump
+role as owner; fix those after the restore with `ALTER … OWNER TO <app role>`.
+
 ## Supabase and multi-database Postgres
 
 A `supabase/postgres` image is recognized automatically and changes the Postgres

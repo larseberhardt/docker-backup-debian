@@ -7,6 +7,20 @@ from typing import Any, List, Tuple
 from .. import config, manifest, restic, runtime, systemd_units, util
 
 
+def template_label(descriptor: Any) -> str:
+    """``TEMPLATE`` column: the bound template's name, or ``-`` for none.
+
+    An operator override is marked so two stacks made from the same template
+    name are still distinguishable when one used ``/etc/docker-backup/templates``.
+    """
+    if not isinstance(descriptor, dict) or not descriptor.get("name"):
+        return "-"
+    name = str(descriptor["name"])
+    if descriptor.get("source") == "operator":
+        return name + " (operator)"
+    return name
+
+
 def cmd_ls(args) -> int:
     on_repo = getattr(args, "on_repo", None)
     if on_repo:
@@ -18,7 +32,7 @@ def cmd_ls(args) -> int:
         return 0
 
     show_snap = getattr(args, "snapshots", False)
-    header = ("NAME", "STACK", "TARGET", "SCHEDULE", "TIMER")  # type: Tuple[str, ...]
+    header = ("NAME", "STACK", "TARGET", "SCHEDULE", "TIMER", "TEMPLATE")  # type: Tuple[str, ...]
     if show_snap:
         header = header + ("LAST SNAPSHOT",)
 
@@ -27,12 +41,13 @@ def cmd_ls(args) -> int:
         try:
             cfg = config.load(n)
         except Exception:
-            rows.append((n, "(corrupt)", "", "", "") + (("",) if show_snap else ()))
+            rows.append((n, "(corrupt)", "", "", "", "") + (("",) if show_snap else ()))
             continue
         sched = (cfg.get("schedule") or {}).get("oncalendar", "-")
         repo = cfg.get("repo", "-")
         timer = systemd_units.timer_active(n) or "-"
-        row = (n, cfg.get("stack_path", "-"), repo, sched, timer)  # type: Tuple[str, ...]
+        row = (n, cfg.get("stack_path", "-"), repo, sched, timer,
+               template_label(cfg.get("template")))  # type: Tuple[str, ...]
         if show_snap:
             snap = "-"
             if cfg.get("key_file"):
@@ -54,11 +69,12 @@ def _ls_on_repo(base: str) -> int:
         print("No backup manifests found under %s." % base)
         return 0
 
-    header = ("NAME", "STACK", "REPO", "DB-SERVICES")  # type: Tuple[str, ...]
+    header = ("NAME", "STACK", "REPO", "DB-SERVICES", "TEMPLATE")  # type: Tuple[str, ...]
     rows = []  # type: List[Tuple[str, ...]]
     for repo, man in found:
         dbs = ", ".join(db.get("service", "?") for db in man.get("db_services") or []) or "-"
-        rows.append((man.get("name", "?"), man.get("stack_path", "-"), repo, dbs))
+        rows.append((man.get("name", "?"), man.get("stack_path", "-"), repo, dbs,
+                     template_label(man.get("template"))))
 
     util.print_table(header, rows)
     print("\nRestore e.g.: docker-backup restore <dest> --from-repo <REPO> --key-file <key>")

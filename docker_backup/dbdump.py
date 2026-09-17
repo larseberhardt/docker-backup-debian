@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import stat
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import compose, util
 
@@ -297,6 +297,93 @@ def build_pg_dump_cmd(user: str, dbname: str, preserve_ownership: bool) -> List[
 
 def build_pg_dumpall_globals_cmd(user: str) -> List[str]:
     return ["pg_dumpall", "--globals-only", "-h", "127.0.0.1", "-U", user]
+
+
+# Objects that a ``--no-owner`` dump would silently hand over to the importing role.
+# Schema ``public`` itself is skipped: pg_dump never recreates it, so its owner comes
+# from the target's own initialization. Extension members follow their extension.
+# Role names are hex-encoded so no name can break the ``hex|count`` line format.
+_PG_FOREIGN_OWNER_SQL = """\
+WITH user_ns AS (
+  SELECT oid, nspname, nspowner FROM pg_catalog.pg_namespace
+  WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+    AND nspname NOT LIKE 'pg\\_toast%' AND nspname NOT LIKE 'pg\\_temp\\_%'
+), ext AS (
+  SELECT classid, objid FROM pg_catalog.pg_depend WHERE deptype = 'e'
+), owned AS (
+  SELECT n.nspowner AS owner FROM user_ns n
+  WHERE n.nspname <> 'public' AND NOT EXISTS (SELECT 1 FROM ext
+    WHERE ext.classid = 'pg_catalog.pg_namespace'::regclass AND ext.objid = n.oid)
+  UNION ALL
+  SELECT c.relowner FROM pg_catalog.pg_class c JOIN user_ns n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND NOT EXISTS (SELECT 1 FROM ext
+    WHERE ext.classid = 'pg_catalog.pg_class'::regclass AND ext.objid = c.oid)
+  UNION ALL
+  SELECT t.typowner FROM pg_catalog.pg_type t JOIN user_ns n ON n.oid = t.typnamespace
+  WHERE t.typtype IN ('e', 'd', 'r', 'm') AND NOT EXISTS (SELECT 1 FROM ext
+    WHERE ext.classid = 'pg_catalog.pg_type'::regclass AND ext.objid = t.oid)
+  UNION ALL
+  SELECT p.proowner FROM pg_catalog.pg_proc p JOIN user_ns n ON n.oid = p.pronamespace
+  WHERE NOT EXISTS (SELECT 1 FROM ext
+    WHERE ext.classid = 'pg_catalog.pg_proc'::regclass AND ext.objid = p.oid)
+)
+SELECT encode(convert_to(r.rolname, 'UTF8'), 'hex') || '|' || count(*)
+FROM owned JOIN pg_catalog.pg_roles r ON r.oid = owned.owner
+WHERE r.rolname <> current_user AND r.rolname <> 'pg_database_owner'
+GROUP BY r.rolname ORDER BY r.rolname"""
+
+
+def build_pg_owner_probe_cmd(user: str, dbname: str) -> List[str]:
+    return ["psql", "-X", "-tAq", "-v", "ON_ERROR_STOP=1",
+            "-h", "127.0.0.1", "-U", user, "-d", dbname, "-c", _PG_FOREIGN_OWNER_SQL]
+
+
+def parse_pg_owner_rows(stdout: str) -> List[Tuple[str, int]]:
+    """Decode ``hex(role)|count`` lines from the owner probe."""
+    rows = []  # type: List[Tuple[str, int]]
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        encoded, sep, count = line.partition("|")
+        try:
+            if not sep or not encoded or not count.isdigit():
+                raise ValueError("malformed row")
+            role = bytes.fromhex(encoded).decode("utf-8", "strict")
+        except (ValueError, UnicodeDecodeError):
+            raise util.CommandError(
+                ["psql", "owner-probe"], 1,
+                "Postgres owner probe returned a malformed row: %r" % line[:80],
+            )
+        rows.append((role, int(count)))
+    return rows
+
+
+def postgres_foreign_owners(
+    db: Dict[str, Any], password: Optional[str],
+    compose_file: str, project_dir: str, project_name: Optional[str],
+) -> List[Tuple[str, str, int]]:
+    """``(database, role, object count)`` for objects NOT owned by the dump role.
+
+    A dump with ``--no-owner`` restores all of these as the importing role, so an
+    application that connects as one of those roles loses ownership of its own
+    schema after a restore (e.g. ``permission denied for schema`` on migrations).
+    """
+    env = {"PGPASSWORD": password} if password else {}
+    if password:
+        util.register_secret(password)
+    _globals_path, targets = postgres_dump_targets(db, "/")
+    out = []  # type: List[Tuple[str, str, int]]
+    for dbname, _path in targets:
+        argv = compose.exec_args(
+            compose_file, project_dir, db["service"],
+            build_pg_owner_probe_cmd(db["auth_user"], dbname),
+            env=env, tty=False, project_name=project_name,
+        )
+        proc = util.run(argv, capture=True, check=True)
+        out.extend((dbname, role, count)
+                   for role, count in parse_pg_owner_rows(proc.stdout or ""))
+    return out
 
 
 def quote_ident(name: str) -> str:

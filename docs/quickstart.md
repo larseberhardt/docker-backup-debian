@@ -29,7 +29,7 @@ sudo docker-backup create --all --auto --target /mnt/backups
 ## 2. Check the result
 
 ```bash
-sudo docker-backup ls                  # configured backups
+sudo docker-backup ls                  # configured backups (incl. bound template)
 sudo docker-backup ls --snapshots      # incl. last restic snapshot
 sudo docker-backup doctor              # health check (incl. last run result)
 ```

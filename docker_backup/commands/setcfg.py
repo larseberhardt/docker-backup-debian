@@ -276,6 +276,15 @@ def _cmd_set_locked(args, name: str) -> int:
                       % (bool(args.dump_globals), len(pg)))
             changed = True
 
+    if getattr(args, "pg_owner_check", None) is not None:
+        cfg["pg_owner_check"] = bool(args.pg_owner_check)
+        if args.pg_owner_check:
+            util.info("Postgres ownership check enabled.")
+        else:
+            util.warn("Postgres ownership check disabled: a restore hands every object "
+                      "to the dump role; apps using another role may fail afterwards.")
+        changed = True
+
     if args.target is not None:
         if not args.ack_dangerous:
             util.error(

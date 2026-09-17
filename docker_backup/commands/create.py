@@ -8,7 +8,8 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from .. import compose, config, detect, hooks, keys, quiesce, restic, systemd_units, templates, util, wizard
+from .. import (compose, config, dbdump, detect, hooks, keys, quiesce, restic, runtime,
+               systemd_units, templates, util, wizard)
 
 
 def _utcnow() -> str:
@@ -145,6 +146,10 @@ def create_one(
 
     if db_autodetect:
         db_services = _build_db_services(cj, name, interactive, dump_user, dump_globals)
+        if dump_globals is None:
+            _preserve_pg_ownership_if_needed(
+                db_services, cj, name, compose_file, stack_path, project_name,
+            )
     else:
         util.info("DB auto-detection disabled — no database is dumped automatically "
                   "(e.g. when the app ships its own dump command as a hook).")
@@ -375,6 +380,43 @@ def _print_escrow(name: str) -> None:
             )
     except OSError:
         pass
+
+
+def _preserve_pg_ownership_if_needed(
+    db_services: List[Dict[str, Any]], cj: Dict[str, Any], name: str,
+    compose_file: str, stack_path: str, project_name: Optional[str],
+) -> None:
+    """Enable the ownership-preserving dump when a running Postgres needs it.
+
+    Best effort: a stopped or unreachable DB is left as detected, and the
+    ownership check of the first ``run`` reports the problem instead.
+    """
+    probe_cfg = {"name": name, "compose_file": compose_file,
+                 "stack_path": stack_path, "project_name": project_name}
+    for db in db_services:
+        if db.get("engine") != "postgres" or db.get("dump_globals"):
+            continue
+        try:
+            if not compose.service_running(compose_file, stack_path, db["service"],
+                                           project_name):
+                continue
+            password = runtime.resolve_password(probe_cfg, db, cj)
+            foreign = dbdump.postgres_foreign_owners(
+                db, password, compose_file, stack_path, project_name,
+            )
+        except (util.CommandError, OSError, KeyError) as exc:
+            util.debug("Postgres ownership probe for '%s' skipped: %s" % (db["service"], exc))
+            continue
+        if foreign:
+            db["dump_globals"] = True
+            util.warn(
+                "DB '%s': objects are owned by role(s) other than '%s' (%s) — enabling "
+                "--dump-globals so a restore keeps their ownership (roles and passwords "
+                "are backed up too). Opt out: docker-backup set %s --no-dump-globals "
+                "--no-owner-check."
+                % (db["service"], db.get("auth_user"),
+                   ", ".join(sorted({role for _db, role, _n in foreign})), name)
+            )
 
 
 def _build_db_services(

@@ -109,6 +109,13 @@ template):
 **added** to the template's. CLI `--pre-cmd`/`--post-cmd`/`--restore-cmd` override the
 template's command for that phase.
 
+## Which backups use a template
+
+`docker-backup ls` shows the bound template per backup in the `TEMPLATE` column
+(`-` for a plain config, `<name> (operator)` when the operator override was applied).
+`docker-backup ls --on-repo <drive>` reads the same information from the manifests on a
+mounted backup drive.
+
 ## Contributing a new template
 
 1. Add `docker_backup/templates/<app>.json` following the schema above.

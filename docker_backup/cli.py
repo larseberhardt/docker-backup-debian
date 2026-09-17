@@ -210,6 +210,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Include cluster globals (roles/passwords) for Postgres in the backup.")
     sg.add_argument("--no-dump-globals", dest="dump_globals", action="store_false", default=None,
                     help="Do not include Postgres globals in the backup.")
+    soc = stp.add_mutually_exclusive_group()
+    soc.add_argument("--owner-check", dest="pg_owner_check", action="store_true", default=None,
+                     help="Fail a Postgres backup whose --no-owner dump would lose object "
+                          "ownership on restore (default).")
+    soc.add_argument("--no-owner-check", dest="pg_owner_check", action="store_false",
+                     default=None,
+                     help="Accept that a restore hands every Postgres object to the dump role.")
     stp.add_argument("--exclude", dest="exclude", action="append", default=None, metavar="PATTERN",
                      help="Add an exclude pattern (repeatable).")
     stp.add_argument("--exclude-clear", dest="exclude_clear", action="store_true",
