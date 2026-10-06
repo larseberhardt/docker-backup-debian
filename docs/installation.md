@@ -87,6 +87,10 @@ automatically — you start updates yourself.
     Auto-detected MySQL/MariaDB configs from those versions must be reviewed and
     refreshed once. See [Refreshing legacy MySQL/MariaDB scope](databases.md#refreshing-legacy-mysqlmariadb-scope).
 
+!!! note "After upgrading from 1.2.0 or older"
+    Postgres stacks with a custom `PGDATA` must be refreshed once, otherwise their
+    next run fails. See [Custom `PGDATA`](databases.md#custom-pgdata).
+
 ## Uninstall
 
 ```bash

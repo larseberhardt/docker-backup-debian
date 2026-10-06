@@ -2623,7 +2623,7 @@ def _preflight_named_volume_restore(
         service = services.get(service_name)
         if not isinstance(service, dict):
             raise ValueError("Database service is missing from Compose: %s" % service_name)
-        data_targets = compose.DB_DATA_DIRS.get(engine) or ()
+        data_targets = compose.db_data_targets(engine, service)
         mounts = [
             volume for volume in (service.get("volumes") or [])
             if isinstance(volume, dict) and volume.get("target") in data_targets

@@ -199,5 +199,74 @@ class NamedVolumePreflightTest(unittest.TestCase):
         self.assertIn("already exists", raised.exception.stderr)
 
 
+class DatabaseMountPreflightTest(unittest.TestCase):
+    """The logical-DB restore needs the service's one raw data mount — also when
+    a custom PGDATA moved it away from the image default."""
+
+    _CFG = {"db_services": [{"service": "db", "engine": "postgres"}]}
+
+    @staticmethod
+    def _compose(mount, environment=None):
+        return {
+            "services": {"db": {
+                "image": "postgres:15.3",
+                "environment": environment or {},
+                "volumes": [mount],
+            }},
+            "volumes": {"pgdata": {}},
+        }
+
+    def _preflight(self, cj):
+        with mock.patch.object(compose, "volume_identity", return_value=None):
+            return restore_cmd._preflight_named_volume_restore(
+                self._CFG, cj, "site", force=False, canonical_dest="/opt/site",
+            )
+
+    def test_bind_at_custom_pgdata_is_accepted(self):
+        cj = self._compose(
+            {"type": "bind", "source": "/opt/site/data", "target": "/data/postgres"},
+            {"PGDATA": "/data/postgres"},
+        )
+        self.assertEqual(self._preflight(cj), [])
+
+    def test_named_volume_at_custom_pgdata_is_recreated_empty(self):
+        cj = self._compose(
+            {"type": "volume", "source": "pgdata", "target": "/data/postgres"},
+            {"PGDATA": "/data/postgres"},
+        )
+        plan = self._preflight(cj)
+        self.assertEqual(
+            [(item["key"], item["archive_key"]) for item in plan],
+            [("pgdata", None)],
+        )
+
+    def test_mount_at_image_default_stays_the_data_mount(self):
+        cj = self._compose(
+            {"type": "bind", "source": "/opt/site/db",
+             "target": "/var/lib/postgresql/data"},
+            {"PGDATA": "/data/postgres"},
+        )
+        cj["services"]["db"]["volumes"].append(
+            {"type": "bind", "source": "/opt/site/data", "target": "/data/postgres"})
+        self.assertEqual(self._preflight(cj), [])
+
+    def test_custom_mount_without_pgdata_is_still_refused(self):
+        cj = self._compose(
+            {"type": "bind", "source": "/opt/site/data", "target": "/data/postgres"},
+        )
+        with self.assertRaises(util.CommandError) as raised:
+            self._preflight(cj)
+        self.assertIn("exactly one explicit data mount", raised.exception.stderr)
+
+    def test_refusal_names_the_custom_pgdata(self):
+        cj = self._compose(
+            {"type": "bind", "source": "/opt/site/data", "target": "/srv/other"},
+            {"PGDATA": "/data/postgres"},
+        )
+        with self.assertRaises(util.CommandError) as raised:
+            self._preflight(cj)
+        self.assertIn("data mount at /data/postgres", raised.exception.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

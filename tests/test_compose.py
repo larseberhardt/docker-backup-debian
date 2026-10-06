@@ -290,5 +290,91 @@ class Postgres18ParentLayoutTest(unittest.TestCase):
         self.assertEqual(excludes, [])
 
 
+class PostgresCustomPgdataTest(unittest.TestCase):
+    """A custom PGDATA moves the cluster out of the image's data volume, e.g.
+    ``PGDATA=/data/postgres`` with ``./data:/data/postgres``. The raw-data
+    exclude/skip must follow it."""
+
+    def _cj(self, volume, pgdata="/data/postgres"):
+        return {
+            "name": "site",
+            "services": {"db": {
+                "image": "postgres:15.3",
+                "environment": {"PGDATA": pgdata, "POSTGRES_USER": "strapi"},
+                "volumes": [volume],
+            }},
+            "volumes": {"pgdata": None},
+        }
+
+    def _dbs(self):
+        return [{"service": "db", "engine": "postgres"}]
+
+    def test_bind_at_custom_pgdata_is_excluded(self):
+        cj = self._cj({"type": "bind", "source": "/opt/site/data",
+                       "target": "/data/postgres"})
+        dbs = self._dbs()
+        excludes, named = compose.collect_volume_backup_plan(cj, dbs)
+        self.assertEqual(excludes, ["/opt/site/data"])
+        self.assertEqual(named, [])
+        self.assertEqual(dbs[0]["raw_data_exclude"], "/opt/site/data")
+        self.assertEqual(dbs[0]["data_dir_target"], "/data/postgres")
+
+    def test_named_volume_at_custom_pgdata_is_skipped(self):
+        cj = self._cj({"type": "volume", "source": "pgdata",
+                       "target": "/data/postgres"})
+        _excludes, named = compose.collect_volume_backup_plan(cj, self._dbs())
+        self.assertEqual(named, [])  # dump replaces it, no tar
+
+    def test_trailing_slash_in_pgdata_still_matches(self):
+        cj = self._cj({"type": "bind", "source": "/opt/site/data",
+                       "target": "/data/postgres"}, pgdata="/data/postgres/")
+        excludes, _named = compose.collect_volume_backup_plan(cj, self._dbs())
+        self.assertEqual(excludes, ["/opt/site/data"])
+
+    def test_mount_at_image_default_keeps_the_existing_plan(self):
+        # A service that mounts the image default was planned around that mount
+        # before PGDATA was honoured; old snapshots depend on it staying so.
+        cj = self._cj({"type": "bind", "source": "/opt/site/db",
+                       "target": "/var/lib/postgresql/data"})
+        cj["services"]["db"]["volumes"].append(
+            {"type": "volume", "source": "pgdata", "target": "/data/postgres"})
+        dbs = self._dbs()
+        excludes, named = compose.collect_volume_backup_plan(cj, dbs)
+        self.assertEqual(excludes, ["/opt/site/db"])
+        self.assertEqual([nv["key"] for nv in named], ["pgdata"])
+        self.assertEqual(dbs[0]["data_dir_target"], "/var/lib/postgresql/data")
+
+    def test_pgdata_below_image_default_keeps_parent_mount(self):
+        # the usual PGDATA=<volume>/pgdata still mounts the image's data volume
+        cj = self._cj({"type": "bind", "source": "/opt/site/db",
+                       "target": "/var/lib/postgresql/data"},
+                      pgdata="/var/lib/postgresql/data/pgdata")
+        excludes, _named = compose.collect_volume_backup_plan(cj, self._dbs())
+        self.assertEqual(excludes, ["/opt/site/db"])
+
+    def test_relative_or_missing_pgdata_changes_nothing(self):
+        for pgdata in ("data/postgres", "", None):
+            with self.subTest(pgdata=pgdata):
+                cj = self._cj({"type": "bind", "source": "/opt/site/data",
+                               "target": "/data/postgres"}, pgdata=pgdata)
+                excludes, _named = compose.collect_volume_backup_plan(cj, self._dbs())
+                self.assertEqual(excludes, [])
+
+    def test_pgdata_is_ignored_for_mysql(self):
+        cj = {
+            "name": "site",
+            "services": {"db": {
+                "image": "mariadb:11",
+                "environment": {"PGDATA": "/data/postgres"},
+                "volumes": [{"type": "bind", "source": "/opt/site/data",
+                             "target": "/data/postgres"}],
+            }},
+        }
+        excludes, _named = compose.collect_volume_backup_plan(
+            cj, [{"service": "db", "engine": "mysql"}],
+        )
+        self.assertEqual(excludes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -112,7 +112,9 @@ install_restic_latest() {
 with bz2.open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
     shutil.copyfileobj(src, dst)' "$tmp/$file" "$tmp/restic" || { warn "Could not unpack $file."; return 1; }
   fi
-  # A truncated/garbage download must not replace a working binary.
+  # A truncated/garbage download must not replace a working binary. The unpacked
+  # file is not executable yet, so the probe needs the mode bit first.
+  chmod 0755 "$tmp/restic" || return 1
   [ -s "$tmp/restic" ] && "$tmp/restic" version >/dev/null 2>&1 \
     || { warn "Downloaded restic binary does not run — keeping the installed version."; return 1; }
 

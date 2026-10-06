@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,6 +28,31 @@ def primary_db_data_dir(engine: str) -> Optional[str]:
     """The canonical data dir of an engine (first candidate) — for config annotation."""
     targets = DB_DATA_DIRS.get(engine)
     return targets[0] if targets else None
+
+
+def db_data_targets(engine: str, service: Optional[Dict[str, Any]] = None) -> Tuple[str, ...]:
+    """Mount targets that hold the raw data dir of one DB service.
+
+    Postgres honours ``PGDATA`` (e.g. ``PGDATA=/data/postgres`` with
+    ``./data:/data/postgres``). It is consulted only when nothing is mounted at
+    an image default: a service with such a mount keeps its existing plan, so
+    snapshots written before this rule still restore the same way.
+    """
+    defaults = DB_DATA_DIRS.get(engine) or ()
+    if engine != "postgres" or not isinstance(service, dict):
+        return defaults
+    mounted = {
+        volume.get("target") for volume in (service.get("volumes") or [])
+        if isinstance(volume, dict)
+    }
+    if mounted.intersection(defaults):
+        return defaults
+    environment = service.get("environment")
+    pgdata = environment.get("PGDATA") if isinstance(environment, dict) else None
+    if not isinstance(pgdata, str) or not pgdata.startswith("/"):
+        return defaults
+    pgdata = posixpath.normpath(pgdata)
+    return defaults if pgdata in defaults else (pgdata,) + defaults
 
 _COMPOSE_FILENAMES = (
     "docker-compose.yml",
@@ -553,13 +579,15 @@ def collect_volume_backup_plan(
       - ``exclude_paths``  : raw DB bind directories → restic ``--exclude``
       - ``named_volumes``  : named volumes (except the DB data dir) → back up via tar
     """
-    db_data_targets = {}  # type: Dict[str, Tuple[str, ...]]
+    services = compose_json.get("services") or {}
+    data_targets_by_service = {}  # type: Dict[str, Tuple[str, ...]]
     for db in db_services:
-        db_data_targets[db["service"]] = DB_DATA_DIRS.get(db["engine"]) or ()
+        data_targets_by_service[db["service"]] = db_data_targets(
+            db["engine"], services.get(db["service"]),
+        )
         db.setdefault("data_dir_target", primary_db_data_dir(db["engine"]))
         db.setdefault("raw_data_exclude", None)
 
-    services = compose_json.get("services") or {}
     top = compose_json.get("volumes") or {}
     project = compose_json.get("name")
 
@@ -567,7 +595,7 @@ def collect_volume_backup_plan(
     named_volumes = []  # type: List[Dict[str, Any]]
 
     for svc_name, svc in services.items():
-        data_targets = db_data_targets.get(svc_name) or ()
+        data_targets = data_targets_by_service.get(svc_name) or ()
         for vol in (svc.get("volumes") or []):
             vtype = vol.get("type")
             target = vol.get("target")

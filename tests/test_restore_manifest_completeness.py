@@ -223,6 +223,24 @@ class ComposePlanAuthenticationTest(unittest.TestCase):
             _compose_model(),
         )
 
+    def test_manifest_from_before_pgdata_support_is_still_accepted(self):
+        # Up to 1.2.0 the mount at the image default was the DB data dir and a
+        # named volume at a custom PGDATA was archived like any other volume.
+        model = _compose_model()
+        model["services"]["db"]["environment"] = {"PGDATA": "/pgdata"}
+        model["services"]["db"]["volumes"].append({
+            "type": "volume", "source": "pg_custom", "target": "/pgdata",
+        })
+        archived = {
+            "key": "pg_custom",
+            "real_name": "app_pg_custom",
+            "target": "/pgdata",
+            "service": "db",
+        }
+        restore_cmd._authenticate_manifest_compose_plan(
+            self._cfg(named_volumes=[_media_volume(), archived]), model,
+        )
+
     def test_swapped_external_descriptor_sources_are_rejected(self):
         model = {
             "name": "app",

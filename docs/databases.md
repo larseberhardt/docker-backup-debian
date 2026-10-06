@@ -79,6 +79,29 @@ On restore, each database is created if missing and imported **atomically**
 (`psql --single-transaction -v ON_ERROR_STOP=1`), so a failed import rolls back
 instead of leaving a half-restored database.
 
+### Custom `PGDATA`
+
+The raw data directory is the mount at `/var/lib/postgresql/data`
+(`/var/lib/postgresql` for postgres:18+). If a service has no mount there and sets
+`PGDATA`, the mount at exactly that path is the data directory instead:
+
+```yaml
+environment:
+  PGDATA: /data/postgres
+volumes:
+  - ./data:/data/postgres
+```
+
+Versions up to 1.2.0 ignored `PGDATA`: such a stack was backed up with its live raw
+directory next to the dump, and `restore` refused it. After updating, the next run
+of an affected stack fails with a *no longer exactly match Compose* error until the
+detection is refreshed once:
+
+```bash
+sudo docker-backup set myapp --refresh-db-detection
+sudo docker-backup run myapp
+```
+
 ### Object ownership (separate app role)
 
 A `--no-owner` dump is imported as the dump role, so **every restored object is
