@@ -7,6 +7,7 @@ Passwords are passed into the exec environment via ``MYSQL_PWD`` / ``PGPASSWORD`
 from __future__ import annotations
 
 import os
+import re
 import stat
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -744,6 +745,311 @@ def _problems_of(proc) -> List[str]:
     return problems
 
 
+# --- Default privileges of the restore target --------------------------------
+# The target's default privileges apply to every object the dump creates (the
+# supabase/postgres image grants ALL on new public tables/functions/sequences to anon and
+# authenticated). pg_dump writes GRANT/REVOKE only relative to Postgres' built-in
+# defaults, so those extra privileges would never be revoked and a restore would
+# silently widen access (seen on Supabase: anon gained ALL on ~100 public tables the
+# source had locked down). Privilege-preserving dumps therefore reset the target's
+# default privileges to the built-in state before EVERY import pass, which is the state
+# pg_dump expects; the dump re-creates the source's own ALTER DEFAULT PRIVILEGES at its end.
+_RESET_DEFAULT_PRIVILEGES_SQL = """\
+DO $docker_backup$
+DECLARE
+  d record;
+  grantee_id oid;
+  kind text;
+  scope text;
+BEGIN
+  FOR d IN SELECT a.defaclrole, a.defaclnamespace, a.defaclobjtype, a.defaclacl
+           FROM pg_catalog.pg_default_acl a LOOP
+    kind := CASE d.defaclobjtype WHEN 'r' THEN 'TABLES' WHEN 'S' THEN 'SEQUENCES'
+      WHEN 'f' THEN 'FUNCTIONS' WHEN 'T' THEN 'TYPES' WHEN 'n' THEN 'SCHEMAS'
+      WHEN 'L' THEN 'LARGE OBJECTS' END;
+    scope := pg_catalog.format('FOR ROLE %s', d.defaclrole::pg_catalog.regrole);
+    IF d.defaclnamespace <> 0 THEN
+      scope := scope || pg_catalog.format(' IN SCHEMA %s',
+        d.defaclnamespace::pg_catalog.regnamespace);
+    END IF;
+    FOR grantee_id IN SELECT DISTINCT x.grantee FROM pg_catalog.aclexplode(d.defaclacl) x LOOP
+      EXECUTE pg_catalog.format('ALTER DEFAULT PRIVILEGES %s REVOKE ALL ON %s FROM %s',
+        scope, kind,
+        CASE WHEN grantee_id = 0 THEN 'PUBLIC' ELSE grantee_id::pg_catalog.regrole::text END);
+    END LOOP;
+    -- A global entry goes back to the built-in default (owner, plus PUBLIC for
+    -- functions/types); Postgres drops the row once it equals that default.
+    IF d.defaclnamespace = 0 THEN
+      EXECUTE pg_catalog.format('ALTER DEFAULT PRIVILEGES %s GRANT ALL ON %s TO %s',
+        scope, kind, d.defaclrole::pg_catalog.regrole);
+      IF d.defaclobjtype IN ('f', 'T') THEN
+        EXECUTE pg_catalog.format('ALTER DEFAULT PRIVILEGES %s GRANT ALL ON %s TO PUBLIC',
+          scope, kind);
+      END IF;
+    END IF;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_default_acl) THEN
+    RAISE EXCEPTION 'docker-backup: default privileges could not be reset';
+  END IF;
+END
+$docker_backup$;
+"""
+
+
+def _reset_default_privileges(
+    db, user, env, dbname, compose_file, project_dir, project_name
+) -> None:
+    """Resets the target's default privileges (see above); raises if that fails, since
+    the following import would otherwise grant more than the source did."""
+    service = db["service"]
+    argv = compose.exec_args(
+        compose_file, project_dir, service, build_psql_import_cmd(user, dbname),
+        env=env, tty=False, project_name=project_name,
+    )
+    if util.DRY_RUN:
+        util.info("DRY-RUN: reset default privileges: " + util.fmt_argv(argv))
+        return
+    proc = util.run(argv, input=_RESET_DEFAULT_PRIVILEGES_SQL, text=True, capture=True,
+                    check=False, mutating=False)
+    if getattr(proc, "returncode", 0) != 0:
+        problems = _problems_of(proc)
+        for line in problems[:10]:
+            util.warn("  " + line)
+        raise util.CommandError(
+            argv, proc.returncode,
+            "Could not reset the default privileges of %s/%s before the import — "
+            "the restored privileges would differ from the source." % (service, dbname),
+        )
+
+
+# --- Event triggers under supautils (Supabase) --------------------------------
+# The supabase/postgres image preloads supautils, which refuses CREATE EVENT TRIGGER
+# unless the creating role and the trigger function's owner are both superusers or both
+# not ("Superuser owned event trigger must execute a superuser owned function"). pg_dump
+# gives every function its final owner early, but creates all event triggers at the very
+# end as the importing superuser and only then hands them to their owner. A source whose
+# trigger owner and function owner differ in that respect (seen on Supabase: trigger
+# issue_pg_cron_access owned by supabase_admin, its function by postgres; trigger
+# issue_pg_net_access owned by postgres) is valid there but cannot be replayed verbatim:
+# the CREATE fails and the following ALTER … OWNER TO reports "does not exist".
+# When those are the ONLY errors left after a lenient pass, the dumped event triggers are
+# recreated with their original owners and verified against the dump (see
+# build_event_trigger_repair_sql), so the restore reproduces the source state exactly.
+_EVENT_TRIGGER_ERROR_MARKERS = ("event trigger", "ereignistrigger")  # DE-locale equivalent
+
+# pg_dump's fmtId(): lower-case simple identifiers stay bare, everything else is quoted.
+_PG_IDENT = r'(?:"(?:[^"]|"")+"|[a-z_][a-z0-9_]*)'
+_EVT_CREATE_RE = re.compile(
+    r"^(CREATE EVENT TRIGGER (?P<name>%s) ON [a-z_]+\n"
+    r"(?: +WHEN TAG IN \([^\n]*\)\n)?"
+    r" +EXECUTE (?:FUNCTION|PROCEDURE) (?P<func>[^\n]+)\(\);)$" % _PG_IDENT, re.M)
+_EVT_STATE_RE = re.compile(
+    r"^ALTER EVENT TRIGGER (?P<name>%s) "
+    r"(?P<state>DISABLE|ENABLE(?: ALWAYS| REPLICA)?);$" % _PG_IDENT, re.M)
+_EVT_OWNER_RE = re.compile(
+    r"^ALTER EVENT TRIGGER (?P<name>%s) OWNER TO (?P<owner>%s);$"
+    % (_PG_IDENT, _PG_IDENT), re.M)
+_EVT_DEPENDENT_RE = re.compile(
+    r"^((?:COMMENT ON|SECURITY LABEL FOR %s ON) EVENT TRIGGER (?P<name>%s) IS "
+    r"(?:'(?:[^']|'')*'|NULL);)$" % (_PG_IDENT, _PG_IDENT), re.M)
+_EVT_STATES = {"ENABLE": "O", "DISABLE": "D", "ENABLE ALWAYS": "A", "ENABLE REPLICA": "R"}
+_REPAIR_DOLLAR_TAG = "$docker_backup$"
+
+# One block per dumped event trigger, all run in ONE transaction with ON_ERROR_STOP.
+# A missing trigger is created AS its owner (SET ROLE). Only when owner and function
+# owner differ in superuser status — the combination supautils refuses — the function is
+# handed to the trigger owner for the CREATE and back right after; its ACL must come out
+# unchanged. Every trigger (recreated or not) is then checked against the dump.
+_EVT_REPAIR_BLOCK = """\
+DO $docker_backup$
+DECLARE
+  trg name := %(name)s;
+  fn oid := pg_catalog.to_regprocedure(%(func)s || '()');
+  trg_owner oid := pg_catalog.to_regrole(%(owner)s);
+  fn_owner oid;
+  fn_acl pg_catalog.aclitem[];
+  swap boolean;
+BEGIN
+  IF fn IS NULL OR trg_owner IS NULL THEN
+    RAISE EXCEPTION 'docker-backup: event trigger %%: function or owner role is missing', trg;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger e WHERE e.evtname = trg) THEN
+    SELECT p.proowner, p.proacl INTO fn_owner, fn_acl
+      FROM pg_catalog.pg_proc p WHERE p.oid = fn;
+    swap := (SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.oid = trg_owner)
+      IS DISTINCT FROM (SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.oid = fn_owner);
+    IF swap THEN
+      EXECUTE pg_catalog.format('ALTER FUNCTION %%s OWNER TO %%s',
+        fn::pg_catalog.regprocedure, trg_owner::pg_catalog.regrole);
+    END IF;
+    EXECUTE pg_catalog.format('SET ROLE %%s', trg_owner::pg_catalog.regrole);
+    EXECUTE %(create)s;
+    RESET ROLE;
+    IF swap THEN
+      EXECUTE pg_catalog.format('ALTER FUNCTION %%s OWNER TO %%s',
+        fn::pg_catalog.regprocedure, fn_owner::pg_catalog.regrole);
+      IF (SELECT p.proacl FROM pg_catalog.pg_proc p WHERE p.oid = fn)
+          IS DISTINCT FROM fn_acl THEN
+        RAISE EXCEPTION 'docker-backup: privileges of %% changed while recreating '
+          'event trigger %%', fn::pg_catalog.regprocedure, trg;
+      END IF;
+      IF (SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.oid = trg_owner) THEN
+        RAISE WARNING 'docker-backup: event trigger %% (owner %%, superuser) runs %% owned '
+          'by non-superuser %% - restored as in the source; supautils refuses to create '
+          'this combination because that role can run code as superuser through it',
+          trg, trg_owner::pg_catalog.regrole, fn::pg_catalog.regprocedure,
+          fn_owner::pg_catalog.regrole;
+      END IF;
+    END IF;
+%(extra)s  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger e
+      WHERE e.evtname = trg AND e.evtowner = trg_owner AND e.evtfoid = fn
+        AND e.evtenabled = %(state)s) THEN
+    RAISE EXCEPTION 'docker-backup: event trigger %% does not match the dump', trg;
+  END IF;
+END
+$docker_backup$;
+"""
+
+
+def _sql_literal(value: str) -> str:
+    """Standard-conforming SQL string literal (the repair script sets the GUC)."""
+    return "'%s'" % value.replace("'", "''")
+
+
+def _unquote_ident(ident: str) -> str:
+    if ident.startswith('"'):
+        return ident[1:-1].replace('""', '"')
+    return ident
+
+
+def _event_trigger_sql(dump_path: str) -> Tuple[str, int]:
+    """The plain-format TOC entries of all event triggers (plus comments/security labels
+    on them) and the number of EVENT TRIGGER entries. COPY data is skipped, so table
+    contents can never be mistaken for a TOC header."""
+    chunks = []  # type: List[bytes]
+    entries = 0
+    capture = in_copy = False
+    with _open_regular_dump(dump_path) as fh:
+        for line in fh:
+            if in_copy:
+                if line.rstrip(b"\r\n") == b"\\.":
+                    in_copy = False
+                continue
+            if line.startswith(b"-- Name: ") or line.startswith(b"-- Data for Name: "):
+                is_trigger = b"; Type: EVENT TRIGGER; " in line
+                if is_trigger:
+                    entries += 1
+                capture = is_trigger or (
+                    line.startswith(b"-- Name: EVENT TRIGGER ")
+                    and (b"; Type: COMMENT; " in line
+                         or b"; Type: SECURITY LABEL; " in line))
+                continue
+            if line.startswith(b"COPY ") and line.rstrip(b"\r\n").endswith(b" FROM stdin;"):
+                in_copy = True
+                capture = False
+                continue
+            if capture:
+                chunks.append(line)
+    return b"".join(chunks).decode("utf-8", "replace"), entries
+
+
+def parse_event_triggers(dump_path: str) -> Optional[List[Dict[str, Any]]]:
+    """The dumped event triggers as dicts (name, owner, function, state, create, extra).
+
+    ``None`` when the dump cannot be mapped unambiguously — an unexpected format, or no
+    ``OWNER TO`` (dump taken with --no-owner) — so the caller keeps the original errors
+    instead of guessing."""
+    sql, entries = _event_trigger_sql(dump_path)
+    owners = {m.group("name"): m.group("owner") for m in _EVT_OWNER_RE.finditer(sql)}
+    states = {m.group("name"): m.group("state") for m in _EVT_STATE_RE.finditer(sql)}
+    dependents = {}  # type: Dict[str, List[str]]
+    for m in _EVT_DEPENDENT_RE.finditer(sql):
+        dependents.setdefault(m.group("name"), []).append(m.group(1))
+    triggers = []  # type: List[Dict[str, Any]]
+    for m in _EVT_CREATE_RE.finditer(sql):
+        qname = m.group("name")
+        if qname not in owners:
+            return None
+        extra = []  # type: List[str]
+        if qname in states:
+            extra.append("ALTER EVENT TRIGGER %s %s;" % (qname, states[qname]))
+        triggers.append({
+            "name": _unquote_ident(qname),
+            "owner": owners[qname],
+            "function": m.group("func"),
+            "state": _EVT_STATES[states.get(qname, "ENABLE")],
+            "create": m.group(1),
+            "extra": extra + dependents.get(qname, []),
+        })
+    if not triggers or len(triggers) != entries:
+        return None
+    return triggers
+
+
+def build_event_trigger_repair_sql(triggers: List[Dict[str, Any]]) -> str:
+    """SQL that recreates missing ``triggers`` with their original owners and verifies all
+    of them (see _EVT_REPAIR_BLOCK). Run it with ON_ERROR_STOP in one transaction."""
+    parts = ["SET standard_conforming_strings = on;\n",
+             "SELECT pg_catalog.set_config('search_path', '', false);\n"]
+    for trg in triggers:
+        embedded = [trg["name"], trg["function"], trg["owner"], trg["create"]] + trg["extra"]
+        if any(_REPAIR_DOLLAR_TAG in text for text in embedded):
+            raise ValueError("event trigger definition contains %s" % _REPAIR_DOLLAR_TAG)
+        parts.append(_EVT_REPAIR_BLOCK % {
+            "name": _sql_literal(trg["name"]),
+            "func": _sql_literal(trg["function"]),
+            "owner": _sql_literal(trg["owner"]),
+            "create": _sql_literal(trg["create"]),
+            "state": _sql_literal(trg["state"]),
+            "extra": "".join("    EXECUTE %s;\n" % _sql_literal(stmt) for stmt in trg["extra"]),
+        })
+    return "".join(parts)
+
+
+def _only_event_trigger_problems(problems: List[str]) -> bool:
+    return bool(problems) and all(
+        any(marker in line.lower() for marker in _EVENT_TRIGGER_ERROR_MARKERS)
+        for line in problems)
+
+
+def _recreate_event_triggers(
+    db, user, env, dbname, dump_path, compose_file, project_dir, project_name
+) -> bool:
+    """Recreates the dumped event triggers with their original owners; True if all of
+    them now match the dump. Atomic: on any failure nothing is changed."""
+    service = db["service"]
+    triggers = parse_event_triggers(dump_path)
+    try:
+        sql = build_event_trigger_repair_sql(triggers) if triggers else ""
+    except ValueError:
+        sql = ""
+    if not sql:
+        util.warn("The event-trigger errors of %s/%s cannot be mapped to the dump — "
+                  "not repaired." % (service, dbname))
+        return False
+    util.info("Only event-trigger errors remain in %s/%s (supautils rejects pg_dump's "
+              "statement order) — recreating the %d dumped event trigger(s) with their "
+              "original owners…" % (service, dbname, len(triggers)))
+    argv = compose.exec_args(
+        compose_file, project_dir, service, build_psql_import_cmd(user, dbname),
+        env=env, tty=False, project_name=project_name,
+    )
+    proc = util.run(argv, input=sql, text=True, capture=True, check=False, mutating=False)
+    if getattr(proc, "returncode", 0) != 0:
+        util.warn("Recreating the event triggers of %s/%s failed (nothing changed):"
+                  % (service, dbname))
+        for line in _problems_of(proc)[:10]:
+            util.warn("  " + line)
+        return False
+    for line in (getattr(proc, "stderr", "") or "").splitlines():
+        if "docker-backup:" in line:
+            util.warn(line.split("docker-backup:", 1)[1].strip())
+    util.info("Event triggers of %s/%s match the dump (owners, functions and state "
+              "verified)." % (service, dbname))
+    return True
+
+
 def _import_mysql(db, password, compose_file, project_dir, project_name, dump_path) -> None:
     tool = _probe_tool(
         compose_file, project_dir, db["service"], ["mariadb", "mysql"], project_name,
@@ -789,7 +1095,8 @@ _MAX_LENIENT_PASSES = 2
 
 
 def _import_db_two_pass(
-    db, user, env, dbname, dump_path, compose_file, project_dir, project_name
+    db, user, env, dbname, dump_path, compose_file, project_dir, project_name,
+    reset_default_privileges: bool = False,
 ) -> None:
     """Imports ONE database — strict; if that fails, lenient until convergence.
 
@@ -801,17 +1108,26 @@ def _import_db_two_pass(
        non-harmless errors. The first lenient pass already restores all objects (the pg_dump
        quirk only affects one harmless up-front stub view before ``CREATE TYPE``); the second
        pass confirms the clean state. ``--clean --if-exists`` makes each pass idempotent
-       (DROP+CREATE per object → no duplicate data).
+       (DROP+CREATE per object → no duplicate data). If a pass leaves ONLY event-trigger
+       errors (supautils on Supabase, see above), the dumped event triggers are recreated
+       with their original owners and verified; the pass then counts as clean.
     3) If real errors remain after all lenient passes, the dump is not merely mis-ordered
        (corrupt, missing privileges, data constraint …). Then it is NOT counted as a success:
        warn visibly AND raise, so the restore aborts with a non-zero exit instead of silently
        reporting an incomplete database as "done".
+
+    With ``reset_default_privileges`` (privilege-preserving dumps) the target's default
+    privileges are reset before the strict run and before every lenient pass — see
+    _reset_default_privileges.
     """
     service = db["service"]
     strict_argv = compose.exec_args(
         compose_file, project_dir, service, build_psql_import_cmd(user, dbname),
         env=env, tty=False, project_name=project_name,
     )
+    if reset_default_privileges:
+        _reset_default_privileges(
+            db, user, env, dbname, compose_file, project_dir, project_name)
     try:
         _import_file(strict_argv, dump_path)
         return
@@ -828,7 +1144,14 @@ def _import_db_two_pass(
     for attempt in range(1, _MAX_LENIENT_PASSES + 1):
         util.info("Lenient re-import of %s/%s (attempt %d/%d, output is being collected)…"
                   % (service, dbname, attempt, _MAX_LENIENT_PASSES))
+        if reset_default_privileges:
+            _reset_default_privileges(
+                db, user, env, dbname, compose_file, project_dir, project_name)
         problems = _import_file_lenient(lenient_argv, dump_path)
+        if _only_event_trigger_problems(problems) and _recreate_event_triggers(
+                db, user, env, dbname, dump_path,
+                compose_file, project_dir, project_name):
+            problems = []
         if not problems:
             util.info("Lenient re-import of %s/%s completed cleanly."
                       % (service, dbname))
@@ -875,8 +1198,11 @@ def _import_postgres(db, password, compose_file, project_dir, project_name, dump
             util.warn("No dump for %s/%s at %s." % (db["service"], dbname, path))
             continue
         _ensure_database(db, user, env, dbname, compose_file, project_dir, project_name)
+        # Only dumps that carry privileges (dump_globals → no --no-privileges) can
+        # re-create the source's default privileges themselves.
         _import_db_two_pass(db, user, env, dbname, path,
-                            compose_file, project_dir, project_name)
+                            compose_file, project_dir, project_name,
+                            reset_default_privileges=bool(db.get("dump_globals")))
         util.info("DB dump imported: %s/%s" % (db["service"], dbname))
         imported += 1
 

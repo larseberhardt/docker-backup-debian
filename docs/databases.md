@@ -171,6 +171,28 @@ is created if missing and imported atomically.
     Works for a same-version restore; always **test-restore into a throwaway dir**
     before relying on it.
 
+    Two more steps keep the result identical to the source:
+
+    - **Default privileges:** the image grants `anon`/`authenticated` `ALL` on every
+      new `public` table, function and sequence, while `pg_dump` only writes
+      privileges relative to Postgres' built-in defaults. Before each import pass the
+      target's default privileges are therefore reset; the dump then re-creates the
+      source's own `ALTER DEFAULT PRIVILEGES`. Without this, privileges revoked on the
+      source (e.g. `anon` on app tables) would come back after a restore.
+    - **Event triggers:** supautils only creates an event trigger if its owner and
+      its function's owner are both superusers or both not, and `pg_dump` creates
+      every event trigger as the importing superuser. Sources where that differs
+      (e.g. `issue_pg_net_access` owned by `postgres`) fail with *Superuser owned event
+      trigger must execute a superuser owned function*. When those are the only errors
+      left, docker-backup recreates each dumped event trigger with its original owner
+      and verifies owners, functions and state against the dump. A superuser-owned
+      trigger running a function owned by a non-superuser is restored as well, but
+      reported: that role can run code as superuser through it.
+
+    What the image adds on its own and the dump cannot remove stays, e.g. the
+    `supabase_vault` extension and the grants the image's pg_cron hook gives to
+    `postgres`.
+
 !!! warning "Not covered"
     If Storage uses an **external S3 backend** (`STORAGE_BACKEND=s3`), the uploaded
     file **objects live in that bucket, not in the stack** — Postgres holds only

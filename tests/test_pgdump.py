@@ -352,6 +352,296 @@ class TwoPassImportTest(unittest.TestCase):
         warn.assert_not_called()      # no fallback in DRY-RUN
 
 
+# Tail of a Supabase pg_dump (plain format, PG 17) as seen on a real production source:
+# trigger issue_pg_cron_access owned by supabase_admin with its function owned by postgres,
+# issue_pg_net_access owned by postgres. supautils refuses both CREATEs as written.
+_EVT_DUMP = '''\
+--
+-- Name: secrets; Type: TABLE DATA; Schema: app; Owner: postgres
+--
+
+COPY app.secrets (id, note) FROM stdin;
+1\tlooks like a header
+-- Name: evil; Type: EVENT TRIGGER; Schema: -; Owner: postgres
+CREATE EVENT TRIGGER evil ON ddl_command_end
+   EXECUTE FUNCTION public.evil();
+ALTER EVENT TRIGGER evil OWNER TO postgres;
+\\.
+
+
+--
+-- Name: issue_pg_cron_access; Type: EVENT TRIGGER; Schema: -; Owner: supabase_admin
+--
+
+CREATE EVENT TRIGGER issue_pg_cron_access ON ddl_command_end
+         WHEN TAG IN ('CREATE EXTENSION')
+   EXECUTE FUNCTION extensions.grant_pg_cron_access();
+
+
+ALTER EVENT TRIGGER issue_pg_cron_access OWNER TO supabase_admin;
+
+--
+-- Name: issue_pg_net_access; Type: EVENT TRIGGER; Schema: -; Owner: postgres
+--
+
+CREATE EVENT TRIGGER issue_pg_net_access ON ddl_command_end
+         WHEN TAG IN ('CREATE EXTENSION')
+   EXECUTE FUNCTION extensions.grant_pg_net_access();
+
+
+ALTER EVENT TRIGGER issue_pg_net_access OWNER TO postgres;
+
+--
+-- Name: Odd "Name"; Type: EVENT TRIGGER; Schema: -; Owner: Ops Admin
+--
+
+CREATE EVENT TRIGGER "Odd ""Name""" ON sql_drop
+   EXECUTE FUNCTION "My Schema".watch();
+
+ALTER EVENT TRIGGER "Odd ""Name""" DISABLE;
+
+
+ALTER EVENT TRIGGER "Odd ""Name""" OWNER TO "Ops Admin";
+
+--
+-- Name: EVENT TRIGGER "Odd ""Name"""; Type: COMMENT; Schema: -; Owner: Ops Admin
+--
+
+COMMENT ON EVENT TRIGGER "Odd ""Name""" IS 'it''s
+multi-line';
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+'''
+
+_SUPAUTILS_ERRORS = (
+    "ERROR:  Superuser owned event trigger must execute a superuser owned function\n"
+    'ERROR:  event trigger "issue_pg_cron_access" does not exist\n'
+)
+
+
+class EventTriggerRepairTest(unittest.TestCase):
+    """Event triggers that supautils refuses to replay are recreated with original owners."""
+
+    def setUp(self):
+        util.set_dry_run(False)
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.dump = os.path.join(self.tmp, "db.postgres.sql")
+        with open(self.dump, "w") as f:
+            f.write(_EVT_DUMP)
+        self.db = {"service": "db"}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        util.set_dry_run(False)
+
+    def test_parse_keeps_owner_function_state_and_comment(self):
+        triggers = dbdump.parse_event_triggers(self.dump)
+        self.assertEqual([t["name"] for t in triggers],
+                         ["issue_pg_cron_access", "issue_pg_net_access", 'Odd "Name"'])
+        cron, net, odd = triggers
+        self.assertEqual((cron["owner"], cron["function"], cron["state"]),
+                         ("supabase_admin", "extensions.grant_pg_cron_access", "O"))
+        self.assertTrue(cron["create"].startswith("CREATE EVENT TRIGGER issue_pg_cron_access"))
+        self.assertTrue(cron["create"].endswith("grant_pg_cron_access();"))
+        self.assertEqual(cron["extra"], [])
+        self.assertEqual(net["owner"], "postgres")
+        self.assertEqual((odd["owner"], odd["function"], odd["state"]),
+                         ('"Ops Admin"', '"My Schema".watch', "D"))
+        self.assertEqual(odd["extra"], [
+            'ALTER EVENT TRIGGER "Odd ""Name""" DISABLE;',
+            "COMMENT ON EVENT TRIGGER \"Odd \"\"Name\"\"\" IS 'it''s\nmulti-line';",
+        ])
+
+    def test_copy_data_is_never_parsed_as_toc(self):
+        names = [t["name"] for t in dbdump.parse_event_triggers(self.dump)]
+        self.assertNotIn("evil", names)
+
+    def test_no_owner_dump_is_not_repaired(self):
+        with open(self.dump, "w") as f:
+            f.write(_EVT_DUMP.replace(
+                "ALTER EVENT TRIGGER issue_pg_net_access OWNER TO postgres;\n", ""))
+        self.assertIsNone(dbdump.parse_event_triggers(self.dump))
+
+    def test_repair_sql_creates_as_owner_and_verifies(self):
+        sql = dbdump.build_event_trigger_repair_sql(dbdump.parse_event_triggers(self.dump))
+        self.assertEqual(sql.count("DO $docker_backup$"), 3)
+        self.assertIn("SET standard_conforming_strings = on;", sql)
+        self.assertIn("pg_catalog.to_regrole('supabase_admin')", sql)
+        self.assertIn("pg_catalog.to_regprocedure('extensions.grant_pg_cron_access' || '()')",
+                      sql)
+        self.assertIn("'SET ROLE %s'", sql)
+        # The CREATE is embedded verbatim as a literal (quotes doubled).
+        self.assertIn("EXECUTE 'CREATE EVENT TRIGGER issue_pg_cron_access ON ddl_command_end\n"
+                      "         WHEN TAG IN (''CREATE EXTENSION'')", sql)
+        self.assertIn("pg_catalog.to_regrole('\"Ops Admin\"')", sql)
+        self.assertIn("EXECUTE 'COMMENT ON EVENT TRIGGER \"Odd \"\"Name\"\"\" IS ''it''''s\n"
+                      "multi-line'';';", sql)
+        self.assertIn("AND e.evtenabled = 'D'", sql)
+
+    def test_repair_sql_refuses_dollar_tag_collision(self):
+        triggers = dbdump.parse_event_triggers(self.dump)
+        triggers[0]["create"] += " -- $docker_backup$"
+        with self.assertRaises(ValueError):
+            dbdump.build_event_trigger_repair_sql(triggers)
+
+    def test_only_event_trigger_problems(self):
+        lines = dbdump._scan_import_errors(_SUPAUTILS_ERRORS)
+        self.assertTrue(dbdump._only_event_trigger_problems(lines))
+        self.assertFalse(dbdump._only_event_trigger_problems(
+            lines + ["ERROR:  permission denied for schema public"]))
+        self.assertFalse(dbdump._only_event_trigger_problems([]))
+
+    def _two_pass(self, side_effect):
+        calls = []
+
+        def record(argv, **kw):
+            calls.append((argv, kw))
+            return side_effect(len(calls), argv, kw)
+
+        with mock.patch.object(dbdump.util, "run", side_effect=record), \
+                mock.patch.object(dbdump.util, "warn") as warn, \
+                mock.patch.object(dbdump.util, "info"):
+            try:
+                dbdump._import_db_two_pass(
+                    self.db, "supabase_admin", {}, "postgres", self.dump,
+                    "/c/docker-compose.yml", "/c", "proj",
+                )
+                raised = False
+            except util.CommandError:
+                raised = True
+        return calls, raised, "\n".join(c.args[0] for c in warn.call_args_list)
+
+    def test_event_trigger_only_errors_are_repaired(self):
+        def side_effect(n, argv, kw):
+            if n == 1:
+                raise util.CommandError(argv, 3, "")           # strict fails
+            if n == 2:
+                return subprocess.CompletedProcess(argv, 0, "", _SUPAUTILS_ERRORS)
+            return subprocess.CompletedProcess(                 # repair succeeds
+                argv, 0, "",
+                "WARNING:  docker-backup: event trigger issue_pg_cron_access (owner "
+                "supabase_admin, superuser) runs … owned by non-superuser postgres\n")
+
+        calls, raised, warned = self._two_pass(side_effect)
+        self.assertFalse(raised)
+        self.assertEqual(len(calls), 3)  # strict + ONE lenient + repair
+        repair_argv, repair_kw = calls[2]
+        self.assertIn("ON_ERROR_STOP=1", repair_argv)          # atomic repair
+        self.assertIn("--single-transaction", repair_argv)
+        self.assertIn("CREATE EVENT TRIGGER issue_pg_net_access", repair_kw["input"])
+        self.assertIs(repair_kw["check"], False)
+        self.assertIn("non-superuser postgres", warned)        # escalation path surfaced
+        self.assertNotIn("could not resolve", warned)
+
+    def test_failed_repair_still_raises(self):
+        def side_effect(n, argv, kw):
+            if n == 1:
+                raise util.CommandError(argv, 3, "")
+            if "input" in kw:                                   # repair attempts fail
+                return subprocess.CompletedProcess(
+                    argv, 3, "", "ERROR:  docker-backup: event trigger x does not match\n")
+            return subprocess.CompletedProcess(argv, 0, "", _SUPAUTILS_ERRORS)
+
+        calls, raised, warned = self._two_pass(side_effect)
+        self.assertTrue(raised)
+        self.assertEqual(len(calls), 5)  # strict + 2 × (lenient + repair)
+        self.assertIn("Recreating the event triggers", warned)
+        self.assertIn("could not resolve", warned)
+
+    def test_mixed_errors_are_not_repaired(self):
+        def side_effect(n, argv, kw):
+            if n == 1:
+                raise util.CommandError(argv, 3, "")
+            return subprocess.CompletedProcess(
+                argv, 0, "", _SUPAUTILS_ERRORS + "ERROR:  permission denied for table x\n")
+
+        calls, raised, _warned = self._two_pass(side_effect)
+        self.assertTrue(raised)
+        self.assertEqual(len(calls), 3)  # strict + 2 lenient, never a repair
+        self.assertFalse(any("input" in kw for _argv, kw in calls))
+
+
+class DefaultPrivilegesResetTest(unittest.TestCase):
+    """Privilege-preserving imports must not inherit the target's default privileges."""
+
+    def setUp(self):
+        util.set_dry_run(False)
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.common = ("/c/docker-compose.yml", "/c", "proj")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        util.set_dry_run(False)
+
+    @staticmethod
+    def _is_reset(call):
+        return "pg_default_acl" in (call[1].get("input") or "")
+
+    def _import(self, dump_globals, side_effect=None):
+        with open(os.path.join(self.tmp, "db.postgres.sql"), "w") as f:
+            f.write("SELECT 1;\n")
+        db = {"service": "db", "auth_user": "supabase_admin",
+              "databases": ["postgres"], "dump_globals": dump_globals}
+        calls = []
+
+        def record(argv, **kw):
+            calls.append((argv, kw))
+            if side_effect:
+                return side_effect(len(calls), argv, kw)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(dbdump.util, "run", side_effect=record), \
+                mock.patch.object(dbdump.util, "info"), \
+                mock.patch.object(dbdump.util, "warn"):
+            dbdump._import_postgres(db, None, *self.common, self.tmp)
+        return calls
+
+    def test_reset_runs_before_strict_import(self):
+        calls = self._import(dump_globals=True)
+        self.assertEqual([self._is_reset(c) for c in calls], [True, False])
+        reset_argv = calls[0][0]
+        self.assertIn("ON_ERROR_STOP=1", reset_argv)
+        self.assertIn("--single-transaction", reset_argv)
+        self.assertEqual(reset_argv[reset_argv.index("-d") + 1], "postgres")
+
+    def test_reset_runs_before_every_lenient_pass(self):
+        # Pass 1 recreates the source's default privileges at its end; pass 2 must not
+        # create its objects under them.
+        def side_effect(n, argv, kw):
+            if n == 2:
+                raise util.CommandError(argv, 3, "")             # strict fails
+            if n == 4:
+                return subprocess.CompletedProcess(               # lenient 1: dirty
+                    argv, 0, "", 'ERROR:  type "public.x[]" does not exist\n')
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        calls = self._import(dump_globals=True, side_effect=side_effect)
+        self.assertEqual([self._is_reset(c) for c in calls],
+                         [True, False, True, False, True, False])
+
+    def test_no_reset_for_dumps_without_privileges(self):
+        # --no-privileges dumps rely on the target's default privileges.
+        calls = self._import(dump_globals=False)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self._is_reset(calls[0]))
+
+    def test_failed_reset_aborts_before_import(self):
+        def side_effect(n, argv, kw):
+            return subprocess.CompletedProcess(argv, 3, "", "ERROR:  boom\n")
+
+        with self.assertRaises(util.CommandError):
+            self._import(dump_globals=True, side_effect=side_effect)
+
+    def test_dry_run_runs_nothing(self):
+        util.set_dry_run(True)
+        calls = self._import(dump_globals=True)
+        self.assertEqual(calls, [])
+
+
 class ImportPostgresFlowTest(unittest.TestCase):
     """Integration test for _import_postgres: create-before-import, skip, legacy fallback."""
 
