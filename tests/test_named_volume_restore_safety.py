@@ -197,6 +197,17 @@ class NamedVolumePreflightTest(unittest.TestCase):
                 )
 
         self.assertIn("already exists", raised.exception.stderr)
+        # The restore error must name that reason, not only the failed step.
+        reason = restore_cmd._reason(raised.exception)
+        self.assertIn("already exists", reason)
+        self.assertIn("--force", reason)
+
+    def test_reason_falls_back_to_the_failed_step(self):
+        self.assertEqual(
+            restore_cmd._reason(util.CommandError(["docker", "volume", "rm"], 1)),
+            "command failed (rc=1): docker volume rm",
+        )
+        self.assertEqual(restore_cmd._reason(ValueError("bad plan")), "bad plan")
 
 
 class DatabaseMountPreflightTest(unittest.TestCase):

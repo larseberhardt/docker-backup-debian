@@ -27,6 +27,13 @@ from .. import (compose, config, dbdump, detect, hooks, keys, manifest, quiesce,
 _COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
 
 
+def _reason(exc: Exception) -> str:
+    """Why *exc* happened. A CommandError's str() only names the failed step;
+    the explanation (or the command's stderr) is in .stderr."""
+    detail = exc.stderr.strip() if isinstance(exc, util.CommandError) else ""
+    return detail or str(exc)
+
+
 @dataclass
 class _RestoreScratch:
     path: str
@@ -212,7 +219,7 @@ def cmd_restore(args) -> int:
                 util.error(
                     "Application restore succeeded, but the backup config was NOT "
                     "saved safely: %s. The restored application data remains at %s."
-                    % (exc, dest)
+                    % (_reason(exc), dest)
                 )
                 return 1
             finally:
@@ -388,7 +395,7 @@ def _apply_local_template_hooks(cfg: Dict[str, Any], *, save_config: bool) -> bo
     try:
         tmpl = templates.load_exact(ref["name"], ref["source"])
     except (KeyError, OSError, util.CommandError) as exc:
-        util.error("Cannot load the exact local template: %s" % exc)
+        util.error("Cannot load the exact local template: %s" % _reason(exc))
         return False
 
     local_provenance = templates.provenance(tmpl, source=ref["source"])
@@ -1535,7 +1542,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
         try:
             _authenticate_manifest_snapshot(cfg, snapshot, restore_paths)
         except (TypeError, ValueError, util.CommandError) as exc:
-            util.error("Cannot authenticate manifest snapshot metadata: %s" % exc)
+            util.error("Cannot authenticate manifest snapshot metadata: %s" % _reason(exc))
             return 1
 
     if (not no_custom_restore and hooks.phase_hooks(cfg, "restore")
@@ -1559,7 +1566,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                 dest, force=force,
             )
         except (OSError, ValueError, util.CommandError) as exc:
-            util.error("Cannot reserve restore target safely: %s" % exc)
+            util.error("Cannot reserve restore target safely: %s" % _reason(exc))
             return 1
         try:
             overlapping = compose.running_writable_bind_mounts_overlapping(dest)
@@ -1572,7 +1579,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             initial_dest_fd = -1
             util.error(
                 "Cannot prove the restore target is quiescent before creating "
-                "scratch data: %s" % exc
+                "scratch data: %s" % _reason(exc)
             )
             return 1
         if overlapping:
@@ -1708,7 +1715,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             except (TypeError, ValueError, util.CommandError) as exc:
                 util.error(
                     "Cannot authenticate manifest database/volume/restore plan: %s"
-                    % exc
+                    % _reason(exc)
                 )
                 return 1
             will_import = no_custom_restore or not hooks.phase_hooks(cfg, "restore")
@@ -1719,7 +1726,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             mappings = _external_restore_mappings(cfg, cj)
             _validate_external_mapping_targets(mappings, dest)
         except util.CommandError as exc:
-            util.error("Cannot map selected external bind data safely: %s" % exc)
+            util.error("Cannot map selected external bind data safely: %s" % _reason(exc))
             return 1
         if mappings:
             util.warn("Selected bind data would be placed outside/alongside the stack:")
@@ -1757,7 +1764,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
             except (OSError, ValueError, util.CommandError) as exc:
                 util.error(
                     "Cannot prove all restore targets are quiescent before "
-                    "placement: %s" % exc
+                    "placement: %s" % _reason(exc)
                 )
                 return 1
             if remaining_bind_users:
@@ -1780,7 +1787,7 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                     canonical_dest=dest,
                 )
             except (ValueError, util.CommandError) as exc:
-                util.error("Cannot restore named volumes safely: %s" % exc)
+                util.error("Cannot restore named volumes safely: %s" % _reason(exc))
                 return 1
 
         util.info("Placing restored stack tree at %s…" % dest)
@@ -2182,7 +2189,7 @@ def _bootstrap_cfg(args, dest: str):
             or os.path.basename(dest.rstrip("/"))
         )
     except (KeyError, TypeError, ValueError, util.CommandError) as exc:
-        util.error("Unsafe or malformed repository manifest: %s" % exc)
+        util.error("Unsafe or malformed repository manifest: %s" % _reason(exc))
         return None, None
     key_file = _resolve_bootstrap_key(args, name)
     if key_file is None:
@@ -2719,7 +2726,7 @@ def _restore_named_volumes(
             pinned_archives.clear()
             if staging_fd >= 0:
                 os.close(staging_fd)
-            raise util.CommandError(["restore", vols_dir], 1, str(exc))
+            raise util.CommandError(["restore", vols_dir], 1, _reason(exc))
     try:
         for item in restore_plan:
             real = item["real_name"]
