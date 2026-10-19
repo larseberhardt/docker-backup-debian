@@ -67,6 +67,43 @@ class RestoreCustomTest(unittest.TestCase):
         self.assertFalse(restore_cmd.compose.up_all.called)
         self.assertFalse(restore_cmd.compose.down_all.called)
 
+    def test_no_custom_restore_warns_before_and_after(self):
+        with mock.patch.object(restore_cmd.util, "warn") as warn:
+            rc = restore_cmd._run_restore(_cfg(), "gitlab", "/opt/gitlab-test", "latest",
+                                          True, no_custom_restore=True)
+        self.assertEqual(rc, 0)
+        messages = [c.args[0] for c in warn.call_args_list]
+        skipped = [m for m in messages if "skips the application restore step" in m]
+        self.assertEqual(len(skipped), 2)
+        self.assertIn("WITHOUT the application restore step", skipped[-1])
+        self.assertIs(messages[-1], skipped[-1])  # last thing the operator sees
+
+    def test_bootstrap_manifest_warning_names_template(self):
+        # --from-repo: the manifest carries no shell, only the requirement marker.
+        cfg = _cfg()
+        cfg["hooks"]["restore"] = []
+        cfg["custom_restore_required"] = True
+        cfg["template"] = {"name": "gitlab", "source": "builtin", "version": "1"}
+        with mock.patch.object(restore_cmd.util, "warn") as warn:
+            rc = restore_cmd._run_restore(cfg, "gitlab", "/opt/gitlab-drill", "latest",
+                                          True, no_custom_restore=True)
+        self.assertEqual(rc, 0)
+        skipped = [c.args[0] for c in warn.call_args_list
+                   if "skips the application restore step" in c.args[0]]
+        self.assertEqual(len(skipped), 2)
+        self.assertIn("template 'gitlab'", skipped[0])
+        self.assertIn("--use-template-hooks", skipped[0])
+
+    def test_no_skipped_warning_without_restore_step(self):
+        cfg = _cfg()
+        cfg["hooks"]["restore"] = []
+        with mock.patch.object(restore_cmd.util, "warn") as warn:
+            rc = restore_cmd._run_restore(cfg, "gitlab", "/opt/gitlab-test", "latest",
+                                          True, no_custom_restore=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any("skips the application restore step" in c.args[0]
+                             for c in warn.call_args_list))
+
     def test_no_restore_hook_uses_builtin(self):
         cfg = _cfg()
         cfg["hooks"]["restore"] = []  # no restore hook -> built-in path

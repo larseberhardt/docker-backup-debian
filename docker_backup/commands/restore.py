@@ -1494,6 +1494,31 @@ def _authenticate_manifest_compose_filename(
         )
 
 
+def _skipped_restore_warning(cfg: Dict[str, Any]) -> Optional[str]:
+    """Describe the application restore step that --no-custom-restore skips.
+
+    A backup whose config has a restore hook (or whose manifest recorded one) is
+    incomplete without it: the built-in path restores files and DB dumps only, so
+    an application that imports its own archive (GitLab) starts with a fresh,
+    empty database. None when the backup has no such step.
+    """
+    if not (cfg.get("custom_restore_required") or hooks.phase_hooks(cfg, "restore")):
+        return None
+    ref = cfg.get("template")
+    if isinstance(ref, dict) and ref.get("name"):
+        owner = "template '%s'" % ref["name"]
+    else:
+        owner = "this backup's config"
+    return (
+        "--no-custom-restore skips the application restore step required by %s. "
+        "Only files, named volumes and built-in database dumps are restored; data "
+        "that the restore hook imports (e.g. GitLab's gitlab-backup archive) is NOT "
+        "loaded, so the application starts empty or with stale data. Use "
+        "--use-template-hooks or a reviewed --restore-cmd for a complete restore."
+        % owner
+    )
+
+
 def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                  no_custom_restore: bool = False,
                  save_config: bool = False) -> int:
@@ -1505,6 +1530,11 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
     except ValueError as exc:
         util.error("Unsafe restore target: %s" % exc)
         return 1
+    # Shown before the (possibly hours-long) restic restore so the operator can
+    # still abort, and repeated after "complete" where it is actually read.
+    skipped_restore = _skipped_restore_warning(cfg) if no_custom_restore else None
+    if skipped_restore:
+        util.warn(skipped_restore)
     runtime.load_backend_env(cfg)
     if not util.DRY_RUN:
         installed = restic.restic_version()
@@ -1912,6 +1942,11 @@ def _run_restore(cfg, name: str, dest: str, snapshot: str, force: bool,
                 "Check the env files, then start: docker compose -f %s up -d"
                 % canonical_compose
             )
+            if skipped_restore:
+                util.warn(
+                    "Restore finished WITHOUT the application restore step. "
+                    + skipped_restore
+                )
         else:
             if not _custom_restore(
                     cfg, new_compose, operation_dest, new_project,
