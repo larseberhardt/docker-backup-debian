@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import os
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -120,6 +122,45 @@ class GitlabExcludeInvariantTest(unittest.TestCase):
     def test_git_data_exclude_is_appended_for_stable_template_order(self):
         tmpl = templates.load("gitlab")
         self.assertEqual(tmpl["exclude_patterns"][-1], "gitlab/data/git-data")
+
+
+class GitlabRsyncableTest(unittest.TestCase):
+    """restic has to deduplicate the registry part, so gzip runs with --rsyncable.
+
+    With plain gzip one pushed image made the whole registry.tar.gz new for
+    restic every night (about 26 GB on a 27 GB registry).
+    """
+
+    # Hook fingerprint of the template before GZIP_RSYNCABLE (docker-backup 1.2.4).
+    BEFORE = "sha256-v2:2f62151f53e37bd1c43c6b3fcfa384bb6b5722a683b10f97a97cd7885b0ca9ef"
+
+    def _pre_cmd(self):
+        pre = templates.to_hooks(templates.load_exact("gitlab", "builtin"))["pre_backup"]
+        self.assertEqual(len(pre), 1)
+        return pre[0]["cmd"]
+
+    def test_pre_hook_asks_gitlab_for_rsyncable_gzip(self):
+        self.assertTrue(self._pre_cmd().endswith(
+            "docker exec gitlab gitlab-backup create CRON=1 GZIP_RSYNCABLE=yes"))
+
+    def test_documented_set_command_makes_an_older_config_match_again(self):
+        tmpl = templates.load_exact("gitlab", "builtin")
+        services = tmpl["restore_services"]
+        cfg_hooks = copy.deepcopy(templates.to_hooks(tmpl))
+
+        # A config created from the template before the change.
+        cfg_hooks["pre_backup"] = [hooks.make_hook(
+            self._pre_cmd().replace(" GZIP_RSYNCABLE=yes", ""), phase="pre_backup")]
+        self.assertEqual(templates.definition_fingerprint(cfg_hooks, services), self.BEFORE)
+
+        # What `docker-backup set gitlab --pre-cmd '<command from the docs>'` stores.
+        with open(os.path.join(os.path.dirname(__file__), "..", "docs", "gitlab.md")) as f:
+            documented = re.search(r"set gitlab --pre-cmd \\\n  '([^']+)'", f.read())
+        self.assertIsNotNone(documented)
+        self.assertEqual(documented.group(1), self._pre_cmd())
+        cfg_hooks["pre_backup"] = [hooks.make_hook(documented.group(1), phase="pre_backup")]
+        self.assertEqual(templates.definition_fingerprint(cfg_hooks, services),
+                         templates.hook_definition_fingerprint(tmpl))
 
 
 class GitlabRestoreHookInvariantTest(unittest.TestCase):

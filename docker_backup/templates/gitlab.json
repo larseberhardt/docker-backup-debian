@@ -1,7 +1,7 @@
 {
   "template_schema_version": 1,
   "name": "gitlab",
-  "description": "GitLab (Omnibus in a container): uses 'gitlab-backup create' for a consistent internal dump, backs up the stack folder WITHOUT the live data, and cleans up the internal dump afterwards. DB auto-detection is off (GitLab dumps itself).",
+  "description": "GitLab (Omnibus in a container): uses 'gitlab-backup create' for a consistent internal dump, backs up the stack folder WITHOUT the live data, and cleans up the internal dump afterwards. DB auto-detection is off (GitLab dumps itself). GZIP_RSYNCABLE=yes keeps the gzip parts inside the archive rsync-friendly, so restic stores only what changed instead of the whole archive (above all a local container registry) after every push.",
   "match": {
     "image_tokens": ["gitlab/gitlab-ce", "gitlab/gitlab-ee", "gitlab/gitlab"]
   },
@@ -42,7 +42,7 @@
   "hooks": {
     "pre_backup": [
       {
-        "cmd": "rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1",
+        "cmd": "rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1 GZIP_RSYNCABLE=yes",
         "on_failure": "abort",
         "name": "gitlab-backup create"
       }

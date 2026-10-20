@@ -22,7 +22,7 @@ This produces a config with `db_autodetect=false`, the live-data excludes,
 
 | Phase    | Command                                                                 |
 |----------|-------------------------------------------------------------------------|
-| pre      | remove stale generated archives, then `gitlab-backup create CRON=1`      |
+| pre      | remove stale generated archives, then `gitlab-backup create CRON=1 GZIP_RSYNCABLE=yes` |
 | post     | `rm -f gitlab/data/backups/*.tar` *(cwd = stack)*                       |
 | restore  | stop Puma/Sidekiq, then run `GITLAB_ASSUME_YES=1 … restore`            |
 
@@ -48,6 +48,30 @@ provider-level backup.
 `docker-backup` captures the Compose stack separately; verify that the GitLab config
 volume (including `gitlab-secrets.json`) is either inside that stack or selected as
 an external bind.
+
+## Why `GZIP_RSYNCABLE=yes`
+
+GitLab packs every part of the archive with `gzip -1` (`registry.tar.gz`,
+`artifacts.tar.gz`, `uploads.tar.gz`, `db/database.sql.gz`, …). Plain gzip output
+changes from the first changed byte to the end, so a single new image pushed to a
+local container registry made restic store the whole registry part again the next
+night. On one production instance with a 27 GB registry that was about 26 GB per
+night with any push, which filled the backup drive through the 30-day retention.
+
+With `GZIP_RSYNCABLE=yes` GitLab runs `gzip --rsyncable -c -1`, which restarts the
+compression at content-defined points. Unchanged files inside a `.tar.gz` part then
+compress to the same bytes again and restic deduplicates them. Measured with
+restic 0.19 and GNU gzip 1.12, as GitLab ships it:
+
+| Second night | plain gzip | `--rsyncable` |
+|---|---|---|
+| 290 MB `.tar.gz` of 80 files, 3 new files between existing ones | 293 MB added | 25 MB added |
+| 320 MB SQL dump, 0.5 % of rows changed throughout | 118 MB added | 121 MB added |
+
+The flag helps the file parts (registry, artifacts, uploads, packages, LFS), not
+the database dump: its changes are spread so evenly that every restic chunk
+(about 1 MB) contains one. The archive grows by about 2 %. Restores are unaffected;
+`gitlab-backup restore` reads either form with `gzip -cd`.
 
 ## Restore
 
@@ -109,3 +133,23 @@ repository remains readable. If the old config used an offsite repository or
 non-default scheduling, pass the corresponding `--offsite`/`--schedule` values as
 well. Review the resulting config, then run one fresh backup to publish a
 template-bound v5 manifest.
+
+### Configs created before `GZIP_RSYNCABLE=yes`
+
+A config keeps the hook commands it was created with, so an existing GitLab config
+does not pick up the flag from the updated template. Set the new pre-hook and
+approve it again in one step:
+
+```bash
+sudo docker-backup set gitlab --pre-cmd \
+  'rm -f gitlab/data/backups/*_gitlab_backup.tar && docker exec gitlab gitlab-backup create CRON=1 GZIP_RSYNCABLE=yes' \
+  --allow-hooks
+```
+
+The config then matches the template again, and the next backup publishes a
+manifest whose hook fingerprint the updated template accepts. Until that backup has
+run, the manifest on the drive still carries the old fingerprint: a cross-server
+restore with `--use-template-hooks` and the updated tool refuses it during that
+window and needs a reviewed `--restore-cmd` instead (the restore command itself did
+not change). The same happens on a server that still runs the old tool and meets a
+new manifest, so update the tool everywhere before relying on it.
